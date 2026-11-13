@@ -1,0 +1,9 @@
+{
+  "place": "none",
+  "title": "Task flow",
+  "overlay": {
+    "kind": "popup",
+    "width": 580,
+    "height": 440
+  }
+}

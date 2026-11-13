@@ -1,0 +1,9 @@
+{
+  "place": "none",
+  "title": "Task notes",
+  "overlay": {
+    "kind": "popup",
+    "width": 640,
+    "height": 520
+  }
+}
