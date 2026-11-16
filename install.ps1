@@ -105,6 +105,10 @@ try {
   if (Test-Path $LayoutsSrc) {
     New-Item -ItemType Directory -Force -Path $LayoutsDst | Out-Null
     Copy-Item -Path (Join-Path $LayoutsSrc "*") -Destination $LayoutsDst -Recurse -Force
+    $StaleState = Join-Path $LayoutsDst ".state\main-plus.json"
+    if (Test-Path $StaleState) {
+      Remove-Item -Path $StaleState -Force -ErrorAction SilentlyContinue
+    }
     Write-Host "    [+] Installed layouts (main-plus.json)" -ForegroundColor Green
   }
 
