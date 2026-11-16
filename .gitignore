@@ -3,6 +3,8 @@
 *
 
 !.gitignore
+!README.md
+!install.ps1
 !layouts/
 layouts/*
 !layouts/main-plus.json
