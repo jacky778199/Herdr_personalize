@@ -514,6 +514,38 @@ export default class Agents extends View {
       if (detail.get(a.address) == null && seen[`${a.space_name}\u0000`] > 1) detail.set(a.address, label(a));
     }
 
+    const sessionStats = shared("cursor.sessionStats");
+    const termByAddr = sessionStats ? new Map(terminals().map((tm) => [tm.address, tm])) : null;
+    const matchSession = (a) => {
+      if (!sessionStats) return null;
+      const term = termByAddr?.get(a.address);
+      const argv = agentArgv(term);
+      const idHit = argv.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+      let s = idHit ? sessionStats.by_id?.[idHit[0]] : null;
+      if (!s && sessionStats.by_title) {
+        const candidates = [clean(a.title), clean(label(a))]
+          .map((x) => x.toLowerCase())
+          .filter((x) => x.length >= 2);
+        for (const key of candidates) {
+          if (sessionStats.by_title[key]) { s = sessionStats.by_title[key]; break; }
+        }
+        if (!s) {
+          for (const key of candidates) {
+            if (key.length < 4) continue;
+            const entry = Object.entries(sessionStats.by_title).find(([tk]) => tk.includes(key) || key.includes(tk));
+            if (entry) { s = entry[1]; break; }
+          }
+        }
+      }
+      if (!s) return null;
+      const modelLabel = s.short_model || s.model;
+      return {
+        text: modelLabel ? `${modelLabel} · ${s.cost_str}` : s.cost_str,
+        cents: s.cents || 0,
+        tip: `模型: ${s.model || "unknown"}\n今日花費: ${s.cost_str} (${s.calls} calls)\n對話: ${s.title}`,
+      };
+    };
+
     const row = (a, i, subs = []) => {
       const pic = icon(a.program, 16, t.foreground);
       const more = detail.get(a.address);
@@ -557,6 +589,7 @@ export default class Agents extends View {
       // Project headers name the folder, so the row still says which space it is in.
       const full = byPriority || isPinned || byProject;
       const name = full ? a.space_name || label(a) : more ?? (/^\d+$/.test(label(a)) ? a.program?.name || label(a) : label(a));
+      const sess = matchSession(a);
       return h_flex()
         .id(`ag-${a.address}`)
         .px(8)
@@ -583,6 +616,20 @@ export default class Agents extends View {
         .child(h_flex().flex_1().min_w(0).gap(5).items_center()
           .child(div().min_w(0).max_w(full && more ? 120 : 200).truncate().text_color(idle ? t.muted : t.foreground).child(name))
           .when(full && Boolean(more), el => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`\u00b7 ${more}`))))
+        .when(Boolean(sess), el => el.child(
+          div()
+            .flex_none()
+            .px(4)
+            .py(1)
+            .rounded(4)
+            .bg(t.chrome)
+            .border(1)
+            .border_color(t.border)
+            .text_size(10)
+            .text_color(sess.cents >= 100 ? (t.ansi3 ?? "#f59e0b") : t.muted)
+            .tooltip(sess.tip)
+            .child(sess.text)
+        ))
         .when(Boolean(machine), el => el.child(div().text_size(10).text_color(t.dim).child(machine)))
         .when(subs.length > 0, el => el.child(fold(a, subs)))
         .when(this.hovered === a.address, el => el.child(pin))

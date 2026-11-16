@@ -81,6 +81,18 @@ function fmtCompactTokens(tok) {
   return String(Math.round(n));
 }
 
+function shortModelName(name) {
+  const s = String(name || "").toLowerCase();
+  if (!s) return "";
+  return s
+    .replace(/^claude-/, "")
+    .replace(/^auto-/, "")
+    .replace(/-(medium|high|low|default|thinking)$/, "")
+    .replace(/-hydrogen/, "-h")
+    .replace(/-carbon/, "-c")
+    .slice(0, 14);
+}
+
 function fillDailySeries(daily, cycleStart) {
   if (!daily?.length) return [];
   const byDate = new Map();
@@ -185,6 +197,7 @@ export default class CursorUsagePanel extends View {
           if (parsed?.ok) {
             this.data = parsed;
             this.publishLiveQuota(parsed);
+            this.publishSessionStats(parsed);
             cx.notify();
           }
         }
@@ -298,6 +311,51 @@ export default class CursorUsagePanel extends View {
     setShared("cursor.liveQuota", next);
   }
 
+  publishSessionStats(d) {
+    const calls = d?.today_calls ?? [];
+    const byId = {};
+    for (const c of calls) {
+      const id = c.conv_id;
+      if (!id) continue;
+      if (!byId[id]) {
+        byId[id] = {
+          conv_id: id,
+          title: c.conv_title || "",
+          model: c.model || "",
+          short_model: shortModelName(c.model),
+          cents: 0,
+          calls: 0,
+          last_ts: c.ts_ms || 0,
+        };
+      }
+      const cur = byId[id];
+      cur.cents += Number(c.charged_cents || 0);
+      cur.calls += 1;
+      if ((c.ts_ms || 0) >= cur.last_ts) {
+        cur.last_ts = c.ts_ms || 0;
+        cur.model = c.model || cur.model;
+        cur.short_model = shortModelName(cur.model);
+      }
+    }
+    const byTitle = {};
+    let totalCents = 0;
+    let totalCalls = 0;
+    for (const item of Object.values(byId)) {
+      const dollars = item.cents / 100;
+      item.cost_str = dollars === 0 ? "$0.00" : dollars < 0.1 ? `$${dollars.toFixed(3)}` : `$${dollars.toFixed(2)}`;
+      totalCents += item.cents;
+      totalCalls += item.calls;
+      const key = String(item.title || "").trim().toLowerCase();
+      if (key && key !== "-" && (!byTitle[key] || item.last_ts >= byTitle[key].last_ts)) {
+        byTitle[key] = item;
+      }
+    }
+    const sig = `${totalCalls}|${Math.round(totalCents * 100)}|${Object.keys(byId).length}`;
+    const prev = shared("cursor.sessionStats");
+    if (prev?.sig === sig) return;
+    setShared("cursor.sessionStats", { sig, by_id: byId, by_title: byTitle });
+  }
+
   refresh(cx, { ifChanged = false, force = false, quiet = false } = {}) {
     if (this.loading) return;
     this.loading = true;
@@ -325,6 +383,7 @@ export default class CursorUsagePanel extends View {
               this.error = null;
               this.lastCheckedAt = parsed.fetched_at;
               this.publishLiveQuota(parsed);
+              this.publishSessionStats(parsed);
               shouldNotify = true;
             }
           } else {
