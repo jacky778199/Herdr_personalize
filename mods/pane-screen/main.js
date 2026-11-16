@@ -141,9 +141,9 @@ export default class Pane extends View {
     const st = paneStatus(p);
     openOverlay({
       mod: "task-flow",
-      kind: "popup",
-      width: 1020,
-      height: 920,
+      kind: "dialog",
+      width: 0.88,
+      height: 0.94,
       props: {
         terminal: p.terminal,
         cwd: p.cwd,

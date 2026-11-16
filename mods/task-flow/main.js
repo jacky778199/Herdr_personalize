@@ -65,13 +65,13 @@ export default class TaskFlowPopup extends View {
       })
       .size_full()
       .min_h(0)
-      .p(18)
-      .gap(12)
+      .p(14)
+      .gap(8)
       .rounded(10)
       .bg(t.popover)
       .border(1)
       .border_color(t.border)
-      .text_size(12.5)
+      .text_size(12)
       // Header
       .child(
         h_flex()
@@ -191,8 +191,8 @@ export default class TaskFlowPopup extends View {
 
                       return v_flex()
                         .id(`task-card-${idx}`)
-                        .p(14)
-                        .gap(10)
+                        .p(11)
+                        .gap(8)
                         .rounded(8)
                         .bg(isLatest ? t.raised : t.canvas)
                         .border(1)
@@ -259,101 +259,116 @@ export default class TaskFlowPopup extends View {
                                 )
                             )
                         )
-                        // 1. Prompt
+                        // Card Body: 左欄 (Prompt + 實作過程) / 右欄 (最終結果)
                         .child(
-                          v_flex()
-                            .p(10)
-                            .gap(4)
-                            .rounded(6)
-                            .bg(t.background)
-                            .border(1)
-                            .border_color(t.border)
-                            .child(div().text_size(10.5).font_semibold().text_color(t.accent).child("1. Prompt"))
-                            .child(div().text_size(13).font_medium().text_color(t.foreground).child(task.prompt))
-                        )
-                        // 3. 實作過程
-                        .when(steps.length > 0, (stepsContainer) =>
-                          stepsContainer.child(
-                            v_flex()
-                              .p(10)
-                              .gap(6)
-                              .rounded(6)
-                              .bg(t.background)
-                              .border(1)
-                              .border_color(t.border)
-                              .child(
-                                h_flex()
-                                  .justify_between()
-                                  .items_center()
+                          h_flex()
+                            .gap(10)
+                            .items_stretch()
+                            // 左欄：1. Prompt + 3. 實作過程
+                            .child(
+                              v_flex()
+                                .flex_1()
+                                .min_w(0)
+                                .gap(8)
+                                // 1. Prompt
+                                .child(
+                                  v_flex()
+                                    .p(9)
+                                    .gap(4)
+                                    .rounded(6)
+                                    .bg(t.background)
+                                    .border(1)
+                                    .border_color(t.border)
+                                    .child(div().text_size(10.5).font_semibold().text_color(t.accent).child("1. Prompt"))
+                                    .child(div().text_size(12.5).font_medium().text_color(t.foreground).child(task.prompt))
+                                )
+                                // 3. 實作過程
+                                .when(steps.length > 0, (stepsContainer) =>
+                                  stepsContainer.child(
+                                    v_flex()
+                                      .p(9)
+                                      .gap(5)
+                                      .rounded(6)
+                                      .bg(t.background)
+                                      .border(1)
+                                      .border_color(t.border)
+                                      .child(
+                                        h_flex()
+                                          .justify_between()
+                                          .items_center()
+                                          .child(
+                                            div()
+                                              .text_size(10.5)
+                                              .font_semibold()
+                                              .text_color(t.muted)
+                                              .child(`3. 實作過程 (${steps.length} 個步驟)`)
+                                          )
+                                          .when(steps.length > 5, (btnEl) =>
+                                            btnEl.child(
+                                              div()
+                                                .id(`toggle-steps-${idx}`)
+                                                .px(6)
+                                                .py(1.5)
+                                                .rounded(4)
+                                                .bg(t.chrome)
+                                                .border(1)
+                                                .border_color(t.border)
+                                                .text_size(10.5)
+                                                .text_color(t.accent)
+                                                .cursor_pointer()
+                                                .hover((s) => s.bg(t.hover))
+                                                .on_click((_e, cx) => {
+                                                  cx.stop_propagation();
+                                                  this.toggleSteps(idx, cx);
+                                                })
+                                                .child(isExpanded ? "收合步驟 ▴" : `展開全部 ${steps.length} 步 ▾`)
+                                            )
+                                          )
+                                      )
+                                      .when(hiddenStepsCount > 0, (moreEl) =>
+                                        moreEl.child(
+                                          div()
+                                            .text_size(10.5)
+                                            .text_color(t.dim)
+                                            .child(`... 尚有較早的 ${hiddenStepsCount} 個步驟（點擊右上角展開全部）`)
+                                        )
+                                      )
+                                      .children(
+                                        displaySteps.map((step, sIdx) => {
+                                          const stepNo = (isExpanded ? 1 : steps.length - displaySteps.length + 1) + sIdx;
+                                          return h_flex()
+                                            .gap(6)
+                                            .items_start()
+                                            .text_size(11.5)
+                                            .text_color(t.muted)
+                                            .child(div().flex_none().text_color(t.dim).child(`${stepNo}.`))
+                                            .child(div().flex_1().min_w(0).child(step));
+                                        })
+                                      )
+                                  )
+                                )
+                            )
+                            // 右欄：4. 最終結果
+                            .when(Boolean(resultText), (sumEl) =>
+                              sumEl.child(
+                                v_flex()
+                                  .flex_1()
+                                  .min_w(0)
+                                  .p(9)
+                                  .gap(5)
+                                  .rounded(6)
+                                  .bg(t.chrome)
+                                  .border(1)
+                                  .border_color(t.border)
+                                  .child(div().text_size(10.5).font_semibold().text_color(t.done ?? "#10b981").child("4. 最終結果"))
                                   .child(
                                     div()
-                                      .text_size(10.5)
-                                      .font_semibold()
-                                      .text_color(t.muted)
-                                      .child(`3. 實作過程 (${steps.length} 個步驟)`)
-                                  )
-                                  .when(steps.length > 5, (btnEl) =>
-                                    btnEl.child(
-                                      div()
-                                        .id(`toggle-steps-${idx}`)
-                                        .px(6)
-                                        .py(1.5)
-                                        .rounded(4)
-                                        .bg(t.chrome)
-                                        .border(1)
-                                        .border_color(t.border)
-                                        .text_size(10.5)
-                                        .text_color(t.accent)
-                                        .cursor_pointer()
-                                        .hover((s) => s.bg(t.hover))
-                                        .on_click((_e, cx) => {
-                                          cx.stop_propagation();
-                                          this.toggleSteps(idx, cx);
-                                        })
-                                        .child(isExpanded ? "收合步驟 ▴" : `展開全部 ${steps.length} 步 ▾`)
-                                    )
+                                      .text_size(12)
+                                      .text_color(t.foreground)
+                                      .child(resultText)
                                   )
                               )
-                              .when(hiddenStepsCount > 0, (moreEl) =>
-                                moreEl.child(
-                                  div()
-                                    .text_size(10.5)
-                                    .text_color(t.dim)
-                                    .child(`... 尚有較早的 ${hiddenStepsCount} 個步驟（點擊右上角展開全部）`)
-                                )
-                              )
-                              .children(
-                                displaySteps.map((step, sIdx) => {
-                                  const stepNo = (isExpanded ? 1 : steps.length - displaySteps.length + 1) + sIdx;
-                                  return h_flex()
-                                    .gap(6)
-                                    .items_start()
-                                    .text_size(11.5)
-                                    .text_color(t.muted)
-                                    .child(div().flex_none().text_color(t.dim).child(`${stepNo}.`))
-                                    .child(div().flex_1().min_w(0).child(step));
-                                })
-                              )
-                          )
-                        )
-                        // 4. 最終結果
-                        .when(Boolean(resultText), (sumEl) =>
-                          sumEl.child(
-                            v_flex()
-                              .p(10)
-                              .gap(5)
-                              .rounded(6)
-                              .bg(t.chrome)
-                              .border(1)
-                              .border_color(t.border)
-                              .child(div().text_size(10.5).font_semibold().text_color(t.done ?? "#10b981").child("4. 最終結果"))
-                              .child(
-                                div()
-                                  .text_size(12)
-                                  .text_color(t.foreground)
-                                  .child(resultText)
-                              )
-                          )
+                            )
                         );
                     })
               )
