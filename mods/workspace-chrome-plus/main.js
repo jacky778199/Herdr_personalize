@@ -1,6 +1,27 @@
 import { View, div, image, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { theme, run, props, window, shared, setShared, updates, layout, exec, appHome, nextCommand } from "herdr";
+import { theme, run, props, window, shared, setShared, updates, layout, exec, appHome, nextCommand, hc, checking } from "herdr";
+
+// How often the title light asks herdr-core whether it is still answering.
+const HEALTH_EVERY = 4000;
+
+function healthMs(ms) {
+  if (ms == null || !Number.isFinite(ms)) return "—";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+// A healthy in-app status check here is about 1–2s. Only a clearly worse result changes the light.
+function healthLevel(prev, coreMs, lagMs, ok) {
+  const core = coreMs ?? Infinity;
+  const lag = lagMs ?? 0;
+  const bad = !ok || core >= 6000 || lag >= 2500;
+  const slow = core >= 3500 || lag >= 1200;
+  if (bad) return "bad";
+  if (prev === "bad") return ok && core < 4000 && lag < 1500 ? (slow ? "slow" : "ok") : "bad";
+  if (slow || (prev === "slow" && (core >= 2800 || lag >= 800))) return "slow";
+  return "ok";
+}
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -45,7 +66,68 @@ export default class WorkspaceChrome extends View {
       // Refresh every 1 hour (3600 seconds)
       cx.timer.every(3600 * 1000, (cx) => this.refreshQuota(cx));
       this.refreshQuota(cx);
+    } else if (!checking()) {
+      this.healthLevel = "unknown";
+      this.healthCoreMs = null;
+      this.healthLagMs = 0;
+      this.healthOk = true;
+      this.healthBusy = false;
+      this.healthDue = Date.now() + HEALTH_EVERY;
+      cx.timer.every(HEALTH_EVERY, (cx) => this.probeHealth(cx));
+      this.probeHealth(cx);
     }
+  }
+
+  probeHealth(cx) {
+    const now = Date.now();
+    const lagMs = Math.max(0, now - (this.healthDue || now));
+    this.healthDue = now + HEALTH_EVERY;
+    if (this.healthBusy) {
+      this.applyHealth(cx, now - this.healthStarted, lagMs, false);
+      return;
+    }
+    this.healthBusy = true;
+    this.healthStarted = now;
+    cx.spawn(async (cx) => {
+      let coreMs = null;
+      let ok = false;
+      try {
+        const res = await hc(["server", "status", "--json"]);
+        coreMs = Date.now() - this.healthStarted;
+        ok = res.code === 0;
+      } catch {
+        coreMs = Date.now() - this.healthStarted;
+      } finally {
+        this.healthBusy = false;
+      }
+      this.applyHealth(cx, coreMs, lagMs, ok);
+    });
+  }
+
+  applyHealth(cx, coreMs, lagMs, ok) {
+    const level = healthLevel(this.healthLevel, coreMs, lagMs, ok);
+    const coreChanged = this.healthCoreMs == null || Math.abs((coreMs ?? 0) - this.healthCoreMs) > 200;
+    const lagChanged = Math.abs((lagMs ?? 0) - (this.healthLagMs ?? 0)) > 200;
+    const changed = level !== this.healthLevel || ok !== this.healthOk || coreChanged || lagChanged;
+    this.healthLevel = level;
+    this.healthCoreMs = coreMs;
+    this.healthLagMs = lagMs;
+    this.healthOk = ok;
+    if (changed) cx.notify();
+  }
+
+  healthLight(compact) {
+    const t = theme();
+    const level = this.healthLevel ?? "unknown";
+    const color = level === "ok" ? "#10b981" : level === "slow" ? "#f59e0b" : level === "bad" ? "#ef4444" : (t.dim ?? t.muted);
+    const label = level === "ok" ? "正常" : level === "slow" ? "偏慢" : level === "bad" ? "緩慢" : "偵測中";
+    const coreText = this.healthOk ? healthMs(this.healthCoreMs) : (this.healthBusy ? `已等待 ${healthMs(this.healthCoreMs)}` : "無回應");
+    const tip = `Herdr ${label}\n核心回應 ${coreText}\n介面延遲 ${healthMs(this.healthLagMs)}`;
+    const dot = div().size(10).flex_none().rounded_full().bg(color)
+      .when(level === "slow" || level === "bad", (el) => el.loop("opacity", { from: 0.35, to: 1, period: level === "bad" ? 700 : 1200 }));
+    return h_flex().id("herdr-health").gap(5).items_center().flex_none().tooltip(tip)
+      .child(dot)
+      .when(!compact, (el) => el.child(div().text_size(12).font_medium().text_color(color).child(label)));
   }
 
   manualRefresh(cx) {
@@ -221,7 +303,8 @@ export default class WorkspaceChrome extends View {
 
     return h_flex().size_full().bg(t.chrome).pl(collapsed ? 6 : 14).pr(10).gap(4).items_center().text_size(13.5)
       .when(window()?.platform === "macos" && !window()?.fullscreen && !collapsed, el => el.pl(76))
-      .when(!collapsed, el => el.child(h_flex().flex_1().gap(8).items_center().child(image("frame/welcome/herdr.png").size(20).rounded(5)).child(div().font_semibold().text_color(t.foreground).child("Herdr"))))
+      .when(!collapsed, el => el.child(h_flex().flex_1().gap(8).items_center().child(image("frame/welcome/herdr.png").size(20).rounded(5)).child(h_flex().gap(6).items_center().child(div().font_semibold().text_color(t.foreground).child("Herdr")).child(this.healthLight(false)))))
+      .when(collapsed && window()?.platform !== "macos", el => el.child(this.healthLight(true)))
       .when(!collapsed, el => el.child(this.button("search", svg("mods/workspace-chrome-plus/search.svg").size(15), () => run("mod.open", { name: "picker" }))))
       // On the macOS rail the traffic lights fill the row; the agents list's » unfolds it.
       .when(!(collapsed && window()?.platform === "macos"), el => el.child(this.button("sidebar-toggle", svg("mods/workspace-chrome-plus/sidebar.svg").size(15), toggleSidebar)));
