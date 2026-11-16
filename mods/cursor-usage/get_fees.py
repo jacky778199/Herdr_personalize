@@ -10,7 +10,10 @@ from datetime import datetime
 
 SOURCE_MD_URL = "https://cursor.com/docs/models-and-pricing.md"
 SOURCE_WEB_URL = "https://cursor.com/docs/models-and-pricing"
-CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_fees_cache.json")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(BASE_DIR)), "data", "cursor-usage")
+os.makedirs(DATA_DIR, exist_ok=True)
+CACHE_PATH = os.path.join(DATA_DIR, "model_fees_cache.json")
 CACHE_TTL_SEC = 86400  # 24 hours
 
 

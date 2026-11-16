@@ -179,7 +179,7 @@ export default class CursorUsagePanel extends View {
   bootstrap(cx) {
     cx.spawn(async (cx) => {
       try {
-        const raw = await readTextFile(`${appHome()}/mods/cursor-usage/usage_cache.json`);
+        const raw = await readTextFile(`${appHome()}/data/cursor-usage/usage_cache.json`);
         if (raw) {
           const parsed = JSON.parse(raw);
           if (parsed?.ok) {

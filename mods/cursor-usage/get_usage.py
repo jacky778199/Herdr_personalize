@@ -26,7 +26,9 @@ import urllib.request
 from datetime import datetime
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CACHE_PATH = os.path.join(BASE_DIR, "usage_cache.json")
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(BASE_DIR)), "data", "cursor-usage")
+os.makedirs(DATA_DIR, exist_ok=True)
+CACHE_PATH = os.path.join(DATA_DIR, "usage_cache.json")
 FALLBACK_SYNC_SEC = 1800  # 30 min safety check even if no local file changed
 
 
