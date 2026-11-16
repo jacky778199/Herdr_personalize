@@ -1,4 +1,5 @@
-/** argv / title hints only: never required for read-screen targeting (that uses screen content). */
+import { isCursorAgentTitle } from "./rules-cursor.js";
+
 const AGENT_ARGV = /\bcursor-agent\b|\bagent(?:\.exe)?\b(?:\s|$)|\bagent\s+--|\-\-api-key\b|\.local\/bin\/agent\b|\.local\/share\/cursor-agent\b|claude(?:-code)?\b|codex\b|\bgemini\b|aider\b|\bpi\b|agent-sdk/i;
 
 export function agentArgv(term) {
@@ -8,5 +9,5 @@ export function agentArgv(term) {
 export function isAgentTerminal(term) {
   if (!term) return false;
   if (AGENT_ARGV.test(agentArgv(term))) return true;
-  return /\bCursor Agent\b/i.test(term.title || "");
+  return isCursorAgentTitle(term.title);
 }

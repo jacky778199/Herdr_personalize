@@ -50,6 +50,7 @@ export default class WorkspaceChrome extends View {
 
   manualRefresh(cx) {
     this.refreshQuota(cx);
+    try { run("cursor-usage.refresh"); } catch {}
   }
 
   refreshQuota(cx) {
@@ -92,8 +93,12 @@ export default class WorkspaceChrome extends View {
     const t = theme();
     const collapsed = narrow();
     if (props()?.footer) {
-      const pct = Math.max(0, Math.min(100, this.quotaPercent ?? 0));
-      const timePct = Math.max(0, Math.min(100, this.timePercent ?? 0));
+      const live = shared("cursor.liveQuota");
+      const qFormatted = live?.formatted ?? this.quotaFormatted;
+      const qDayNum = typeof live?.day_num === "number" ? live.day_num : this.dayNum;
+      const qDaysTotal = typeof live?.days_total === "number" ? live.days_total : this.daysTotal;
+      const pct = Math.max(0, Math.min(100, (typeof live?.percent === "number" ? live.percent : this.quotaPercent) ?? 0));
+      const timePct = Math.max(0, Math.min(100, (typeof live?.time_percent === "number" ? live.time_percent : this.timePercent) ?? 0));
 
       // Bar color for quota
       let barColor = "#38bdf8";
@@ -114,7 +119,7 @@ export default class WorkspaceChrome extends View {
         paceLabel = "偏高";
       }
 
-      const tooltipText = `Cursor用量: ${this.quotaFormatted} (${pct}%)\n週期進度: 第 ${this.dayNum}/${Math.round(this.daysTotal)} 天 (${timePct}%)\n節奏狀態: ${paceLabel} (用量 ${pct}% vs 時間 ${timePct}%)\n點擊手動更新`;
+      const tooltipText = `Cursor用量: ${qFormatted} (${pct}%)\n週期進度: 第 ${qDayNum}/${Math.round(qDaysTotal)} 天 (${timePct}%)\n節奏狀態: ${paceLabel} (用量 ${pct}% vs 時間 ${timePct}%)\n點擊開啟右側用量細節面板`;
 
       const refreshBtn = div().id("quota-refresh-btn")
         .size(16).flex_none().flex().items_center().justify_center().rounded(4)
@@ -135,7 +140,11 @@ export default class WorkspaceChrome extends View {
 
       const quotaBlock = v_flex().id("quota-block").px(8).py(5).gap(3).rounded(8)
         .cursor_pointer().hover(s => s.bg(t.hover))
-        .on_click((_e, cx) => this.manualRefresh(cx))
+        .on_click((_e, cx) => {
+          this.manualRefresh(cx);
+          run("layout.select", { stack: "panel-body", child: "usage" });
+          run("layout.show", { id: "panel" });
+        })
         .tooltip(tooltipText)
         // Row 1: Status light + Quota amount + Percentage + Refresh icon
         .child(
@@ -143,7 +152,7 @@ export default class WorkspaceChrome extends View {
             .child(
               h_flex().gap(6).items_center()
                 .child(div().size(7).rounded_full().bg(paceColor).flex_none())
-                .child(div().text_size(12).font_medium().text_color(t.foreground).child(this.quotaFormatted))
+                .child(div().text_size(12).font_medium().text_color(t.foreground).child(qFormatted))
             )
             .child(
               h_flex().gap(5).items_center()
@@ -167,7 +176,7 @@ export default class WorkspaceChrome extends View {
         .child(
           h_flex().items_center().justify_between().w_full().pt(1)
             .child(
-              div().text_size(10).text_color(t.dim).child(`第 ${this.dayNum}/${Math.round(this.daysTotal)} 天`)
+              div().text_size(10).text_color(t.dim).child(`第 ${qDayNum}/${Math.round(qDaysTotal)} 天`)
             )
             .child(
               div().text_size(10).text_color(t.dim).child(`時間 ${timePct}%`)

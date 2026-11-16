@@ -53,8 +53,9 @@ export default class Pane extends View {
     this.fetching = false;
 
     cx.timer.every(160, () => flushPendingPaste());
-    // Agent 狀態才抓任務標題。失敗或沒有唯一標題時保留上一筆。
-    cx.timer.every(9000, async (cx) => {
+    let lastFetchedTitle = "";
+    // Agent 狀態才抓任務歷程。避免高頻開進程，標題變更或每 60 秒才抓一次。
+    cx.timer.every(15000, async (cx) => {
       if (this.fetching) return;
       const p = this.me();
       if (!p?.terminal) return;
@@ -66,9 +67,16 @@ export default class Pane extends View {
         }
         return;
       }
+      const curTitle = p.title || "";
+      const now = Date.now();
+      if (curTitle === lastFetchedTitle && (now - this.lastFetched) < 60000) {
+        return;
+      }
       this.fetching = true;
       try {
         const flow = await fetchAgentTaskFlow(p.terminal, p.cwd, p.title, st);
+        lastFetchedTitle = curTitle;
+        this.lastFetched = now;
         if (flow && JSON.stringify(flow) !== JSON.stringify(this.taskFlow)) {
           this.taskFlow = flow;
           cx.notify();
@@ -143,8 +151,15 @@ export default class Pane extends View {
     // 當前 task 的簡短摘要 (只在判定為 Agent 終端且有專屬 task 時顯示)
     const latestTask = st ? this.taskFlow?.tasks?.[this.taskFlow.tasks.length - 1] : null;
     const rawPrompt = latestTask?.prompt ? latestTask.prompt.replace(/[\b\x08]+/g, "").trim() : "";
-    const taskTitle = rawPrompt
-      ? (rawPrompt.length > 25 ? rawPrompt.slice(0, 24) + "…" : rawPrompt)
+    let cleanPrompt = rawPrompt;
+    if (!cleanPrompt && p.title && st) {
+      const clean = p.title.replace(/\s*[-–—]\s*(?:[⏳⌨️🧭📝📂📤🔄📋🔐❓✅]|Working|Ready|Waiting|Running|Planning|Reviewing).*$/i, "").trim();
+      if (clean && !/^(?:pwsh|powershell|bash|sh|cmd)(?:\.exe)?$/i.test(clean) && !clean.includes("Cursor Agent")) {
+        cleanPrompt = clean;
+      }
+    }
+    const taskTitle = cleanPrompt
+      ? (cleanPrompt.length > 25 ? cleanPrompt.slice(0, 24) + "…" : cleanPrompt)
       : null;
 
     return h_flex()

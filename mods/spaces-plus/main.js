@@ -5,7 +5,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, machines, panes, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout, appHome, readTextFile } from "herdr";
+import { spaces, machines, panes, run, openOverlay, closeOverlay, props, exec, hc, theme, shared, setShared, watchFolder, window, layout, appHome, readTextFile } from "herdr";
 
 function appFile(...parts) {
   const root = appHome().replace(/[\\/]+$/, "");
@@ -52,6 +52,23 @@ const RAIL_CELL = 32;
 const railCell = (el) => h_flex().flex_none().justify_center().child(el);
 const where = (s, ps) => JSON.stringify([s.machine ?? null, place(s, ps)]);
 const base = (path) => path.replace(/\/+$/, "").split("/").pop();
+const leaf = (path) => {
+  const norm = String(path ?? "").replace(/[\\/]+$/, "");
+  const cut = Math.max(norm.lastIndexOf("/"), norm.lastIndexOf("\\"));
+  return (cut >= 0 ? norm.slice(cut + 1) : norm) || "";
+};
+// Machine view is the shipped grouping. Project view buckets spaces by git repo
+// name, else the live folder, and asks Agents to follow.
+const VIEWS = [
+  { id: "machine", label: "By machine", icon: "monitor", agents: "grouped" },
+  { id: "project", label: "By project folder", icon: "folder", agents: "project" },
+];
+const viewOf = () => VIEWS.find((v) => v.id === shared("spaces.view")) ?? VIEWS[0];
+const idPart = (s) => {
+  let h = 0;
+  for (const c of String(s)) h = Math.imul(h, 31) + c.codePointAt(0) | 0;
+  return (h >>> 0).toString(36);
+};
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
 // for this often, in repos the list shows, while the window is in front.
 const FALLBACK = 60000;
@@ -71,6 +88,7 @@ export function tone(t, status) {
 
 export default class Spaces extends View {
   init(_props, cx) {
+    if (props()?.viewMenu) return;
     this.git = {}; // where() -> { name, branch, ahead, behind, repo, linked }, null: not a repo
     this.checked = {}; // where() -> when it was last looked at
     this.unsure = new Set(); // where()s git couldn't answer for (a machine away)
@@ -92,6 +110,7 @@ export default class Spaces extends View {
     this.reconnecting = JSON.parse(localStorage.getItem("machines.reconnecting") ?? "{}");
     for (const state of Object.values(this.reconnecting)) state.busy = false;
     this.folded = new Set(JSON.parse(localStorage.getItem("machines.folded") ?? "[]"));
+    this.projectFolded = new Set(JSON.parse(localStorage.getItem("spaces.projectFolded") ?? "[]"));
     this.refreshMachines(cx);
     cx.timer.every(15000, cx => this.refreshMachines(cx));
     this.refreshUsage(cx);
@@ -368,6 +387,114 @@ export default class Spaces extends View {
     return out.filter(r => this.shown.has(r.w.id));
   }
 
+  // Git repo name when known, otherwise the live folder's own name.
+  // Same repo name on two machines shares one project. A folder git has not
+  // answered for stays on its own so two unrelated "src" dirs do not merge.
+  projectInfo(w, ps) {
+    const folder = place(w, ps) || w.folder || "";
+    const g = this.git[where(w, ps)];
+    if (g?.name) return { key: `repo:${g.name.toLowerCase()}`, label: g.name, folder };
+    const label = (!w.named && w.name) ? w.name : (leaf(folder) || w.name || "Other");
+    const dir = String(folder).replace(/[\\/]+$/, "").toLowerCase();
+    return { key: `dir:${w.machine ?? ""}:${dir || label.toLowerCase()}`, label, folder };
+  }
+
+  publishProjects(ps) {
+    const map = {};
+    for (const s of spaces()) {
+      const info = this.projectInfo(s, ps);
+      map[s.id] = { key: info.key, label: info.label };
+    }
+    const next = JSON.stringify(map);
+    if (next === this.publishedProjects) return;
+    this.publishedProjects = next;
+    setShared("spaces.projects", map);
+  }
+
+  viewMenu(t) {
+    const on = viewOf().id;
+    return v_flex()
+      .w_full()
+      .p(5)
+      .bg(t.popover)
+      .text_size(12.8)
+      .child(div().px(8).pt(4).pb(6).text_size(11).text_color(t.dim).child("Group spaces"))
+      .children(VIEWS.map((v) => h_flex()
+        .id(`space-view-${v.id}`)
+        .h(31)
+        .px(8)
+        .gap(9)
+        .rounded(7)
+        .items_center()
+        .text_color(t.foreground)
+        .hover((el) => el.bg(t.hover))
+        .on_click(() => {
+          setShared("spaces.view", v.id);
+          setShared("agents.sort", v.agents);
+          closeOverlay(props().overlay);
+        })
+        .child(svg(`mods/workspace-chrome/${v.icon}.svg`).size(14).flex_none().text_color(t.muted))
+        .child(div().flex_1().child(v.label))
+        .when(v.id === on, (el) => el.child(svg("mods/workspace-chrome/check.svg").size(14).flex_none().text_color(t.foreground)))));
+  }
+
+  // Login / rebuilt machines stay reachable when spaces are not under machine headers.
+  trouble(t, collapsed) {
+    if (collapsed) return [];
+    const names = [...new Set([...this.machines.map((m) => m.name), ...Object.keys(this.reconnecting)])];
+    const out = [];
+    for (const m of names) {
+      const repair = this.reconnecting[m];
+      const machine = this.machines.find((k) => k.name === m) ?? repair?.machine;
+      const login = machine?.state === "needs_login";
+      const rebuilt = this.rebuilt(machine) || !!repair;
+      if (!login && !rebuilt) continue;
+      const cmd = `hc machine login ${m}`;
+      out.push(h_flex().id(`project-trouble-${m}`).h(28).px(8).gap(7).flex_none().items_center().text_size(11).text_color(t.blocked)
+        .child(svg("mods/workspace-chrome/server.svg").size(13).flex_none())
+        .child(div().flex_1().min_w(0).truncate().child(login ? `${m} needs a login` : `${m} rebuilt`))
+        .when(login, (el) => el.child(div().flex_none().cursor_pointer().text_color(t.foreground)
+          .on_click((_e, cx) => { cx.stop_propagation(); cx.write_to_clipboard(cmd); run("app.settings", { section: "machines" }); })
+          .child("Login")))
+        .when(rebuilt && !login, (el) => el.child(div().flex_none().cursor_pointer().text_color(t.foreground)
+          .on_click((_e, cx) => { cx.stop_propagation(); this.reconnect(machine, cx); })
+          .child(repair?.busy ? "Connecting…" : "Connect"))));
+    }
+    return out;
+  }
+
+  // Spaces under a header per project folder. Worktree nesting from ordered() stays.
+  byProject(t, collapsed) {
+    const ps = panes();
+    const draw = (r) => (collapsed ? this.compact(r, t) : this.row({ ...r, reorder: false, showMachine: true }, t));
+    const items = this.ordered().map((r) => ({ ...r, project: this.projectInfo(r.w, ps) }));
+    const keys = [];
+    for (const r of items) if (!keys.includes(r.project.key)) keys.push(r.project.key);
+    const remote = [...new Set([...items.map((r) => r.w.machine).filter(Boolean), ...this.machines.map((m) => m.name)])];
+    const usage = [null, ...remote].flatMap((m) => this.usageRow(m, t, collapsed));
+    const groups = keys.flatMap((key) => {
+      const mine = items.filter((r) => r.project.key === key);
+      const label = mine[0].project.label || "Other";
+      const folded = this.projectFolded.has(key);
+      const head = h_flex().id(`project-${idPart(key)}`).h(26).flex_none().px(collapsed ? 0 : 8).gap(7).items_center().text_size(11).text_color(t.dim)
+        .when(collapsed, (el) => el.mt(4).w(RAIL_CELL).justify_center().rounded(6).tooltip(label))
+        .cursor_pointer().hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => {
+          folded ? this.projectFolded.delete(key) : this.projectFolded.add(key);
+          localStorage.setItem("spaces.projectFolded", JSON.stringify([...this.projectFolded]));
+          cx.notify();
+        })
+        .child(svg("mods/workspace-chrome/folder.svg").size(13).flex_none())
+        .when(!collapsed, (el) => el
+          .child(div().flex_1().min_w(0).truncate().child(label))
+          .child(div().flex_none().child(String(mine.length)))
+          .child(svg(`mods/workspace-chrome/chevron-${folded ? "right" : "down"}.svg`).size(11).flex_none()));
+      const cell = collapsed ? railCell : (el) => el;
+      return [cell(head), ...(folded ? [] : mine.map(draw))];
+    });
+    return [...this.trouble(t, collapsed), ...usage, ...groups];
+  }
+
   // The rows, under a header per machine once one isn't this computer.
   grouped(t, collapsed) {
     const rows = this.ordered();
@@ -462,7 +589,7 @@ export default class Spaces extends View {
       .when(g.behind > 0, (el) => el.child(div().flex_none().text_color(t.ansi1).child(`\u2193${g.behind}`)));
   }
 
-  row({ w, i, g, tree }, t) {
+  row({ w, i, g, tree, reorder = true, showMachine = false }, t) {
     const on = w.active;
     const fromIndex = this.pressed === null ? -1 : spaces().findIndex(s => s.id === this.pressed);
     const colors = shared("space.colors") ?? {};
@@ -485,10 +612,12 @@ export default class Spaces extends View {
           .when(fromIndex > i, line => line.top(0)),
       ))
       .on_mouse_down("left", () => {
+        if (!reorder) return;
         this.pressed = w.id;
         this.over = w.id;
       })
       .on_mouse_move((_e, cx) => {
+        if (!reorder) return;
         const source = spaces().find(s => s.id === this.pressed);
         const over = source && (source.machine ?? null) === (w.machine ?? null) ? w.id : null;
         if (this.pressed !== null && this.over !== over) {
@@ -497,6 +626,10 @@ export default class Spaces extends View {
         }
       })
       .on_mouse_up("left", (_e, cx) => {
+        if (!reorder) {
+          run("space.select", { id: w.id });
+          return;
+        }
         const from = this.pressed;
         const over = this.over;
         this.pressed = null;
@@ -514,7 +647,8 @@ export default class Spaces extends View {
           .items_center()
           .when(Boolean(tree), el => el.pl(22).child(svg("mods/workspace-chrome/branch.svg").size(13).text_color(t.dim)))
           .when(!tree, el => el.child(h_flex().size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...w.name][0]?.toUpperCase() ?? "?")))
-          .child(div().flex_shrink(0).max_w(150).truncate().text_color(t.foreground).child(w.name))
+          .child(div().flex_shrink(0).max_w(showMachine ? 120 : 150).truncate().text_color(t.foreground).child(w.name))
+          .when(showMachine && Boolean(w.machine), (el) => el.child(div().flex_none().text_size(10).text_color(t.dim).child(w.machine)))
           .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1()),
       );
   }
@@ -537,7 +671,10 @@ export default class Spaces extends View {
 
   render() {
     const t = theme();
+    if (props()?.viewMenu) return this.viewMenu(t);
     const collapsed = narrow();
+    const view = viewOf();
+    this.publishProjects(panes());
     const palette = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
     const sp = spaces();
     const ids = new Set(sp.map(p => p.id));
@@ -554,10 +691,15 @@ export default class Spaces extends View {
       .child(h_flex().h(31).pl(16).pr(10).items_center().justify_between().text_size(11.5).text_color(t.dim)
         .when(collapsed, el => el.pl(0).pr(0).justify_center())
         .when(!collapsed, el => el.child("Spaces"))
-        .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).hover(s => s.bg(t.hover).text_color(t.foreground))
-          .on_click(() => run("space.new")).child(svg("mods/workspace-chrome/plus.svg").size(14))))
+        .child(h_flex().gap(2).items_center()
+          .when(!collapsed, el => el.child(div().id("space-view").size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
+            .tooltip(`Group spaces: ${view.label}`)
+            .on_click(() => openOverlay({ mod: "spaces-plus", kind: "popup", width: 220, height: 148, props: { viewMenu: true } }))
+            .child(svg(`mods/workspace-chrome/${view.icon}.svg`).size(14))))
+          .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).hover(s => s.bg(t.hover).text_color(t.foreground))
+            .on_click(() => run("space.new")).child(svg("mods/workspace-chrome/plus.svg").size(14)))))
       .child(v_flex().flex_1().min_h(0).px(collapsed ? 0 : 8).pb(14).overflow_y_scrollbar().mode("always")
         .on_mouse_up("left", (_e, cx) => { this.pressed = null; cx.notify(); })
-        .children(this.grouped(t, collapsed)));
+        .children(view.id === "project" ? this.byProject(t, collapsed) : this.grouped(t, collapsed)));
   }
 }

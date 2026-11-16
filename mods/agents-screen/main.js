@@ -5,13 +5,13 @@ import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout, hc, nextCommand } from "herdr";
 import {
-  collectBackgroundScreenTargets,
-  collectDiscoveryCandidates,
-  collectScreenTargets,
-  confirmCursorAgentScreen,
   readScreen,
   publishScreenShared,
 } from "./detect.js";
+import {
+  detectCursorFromTitle,
+  isCursorAgentTitle,
+} from "./rules-cursor.js";
 import { autoInputEnabled, pickAutoInput, screenFingerprint } from "./auto-input.js";
 import { startCoreSync } from "./core-sync.js";
 import { statusWord } from "./status-word.js";
@@ -129,6 +129,7 @@ const kidStatus = (k, listed, coreByTerminal) => {
 const SORTS = [
   { id: "priority", label: "Priority", icon: "clock" },
   { id: "grouped", label: "Grouped by space", icon: "layers" },
+  { id: "project", label: "By project folder", icon: "folder" },
 ];
 const sortOf = () => SORTS.find((s) => s.id === shared("agents.sort")) ?? SORTS[0];
 const SECTION = { 4: "Needs you", 3: "Done", 2: "Working", 1: "Idle" };
@@ -159,15 +160,13 @@ export default class Agents extends View {
     this.migratingPins = new Set();
     this.screenByTerminal = shared("screen-status.by-terminal") ?? {};
     this.screenWorkingSince = {};
-    this.screenPolling = false;
     this.autoInputLast = {};
-    this.screenPending = new Set();
-    this.knownScreenAgents = new Set(Object.keys(shared("screen-status.by-terminal") ?? {}));
-    this.discoverCursor = 0;
+    this.autoInputPending = new Set();
+    this.knownAgents = new Set(Object.keys(shared("screen-status.by-terminal") ?? {}));
     if (shared("cursor.auto-input") === undefined) setShared("cursor.auto-input", false);
     cx.timer.every(30000, (cx) => cx.notify());
     startCoreSync(cx, {
-      onScreenRefresh: (addr) => this.queueScreenRead(addr, cx),
+      onScreenRefresh: () => this.syncStatus(cx),
     });
     cx.spawn(async () => {
       for (;;) {
@@ -177,91 +176,99 @@ export default class Agents extends View {
         }
       }
     });
-    cx.timer.every(2500, (cx) => this.pollScreen(cx));
-    this.pollScreen(cx);
+    cx.timer.every(1000, (cx) => this.syncStatus(cx));
+    this.syncStatus(cx);
   }
 
-  queueScreenRead(addr, cx) {
-    if (!addr) return;
-    this.screenPending.add(addr);
-    this.pollScreen(cx);
+  queueScreenRead(_addr, cx) {
+    this.syncStatus(cx);
   }
 
-  pollScreen(cx) {
-    if (this.screenPolling) return;
-    const discover = collectDiscoveryCandidates(this.knownScreenAgents);
-    const targets = [...new Set([
-      ...collectScreenTargets(this.knownScreenAgents),
-      ...this.screenPending,
-      ...discover.slice(this.discoverCursor, this.discoverCursor + 2),
-    ])];
-    if (discover.length) this.discoverCursor = (this.discoverCursor + 2) % Math.max(discover.length, 1);
-    this.screenPending.clear();
-    if (!targets.length) return;
-    this.screenPolling = true;
-    cx.spawn(async (cx) => {
-      try {
-        const prev = { ...this.screenByTerminal };
-        const next = { ...prev };
-        let changed = false;
-        for (const addr of targets) {
-          const discovering = !this.knownScreenAgents.has(addr);
-          const { text, status: st } = await readScreen(addr, discovering ? 22 : 40);
-          if (discovering) {
-            if (!confirmCursorAgentScreen(text)) continue;
-            this.knownScreenAgents.add(addr);
-          } else if (!confirmCursorAgentScreen(text) && st === "idle") {
-            this.knownScreenAgents.delete(addr);
-            delete next[addr];
-            delete this.screenWorkingSince[addr];
-            changed = true;
-            continue;
-          } else {
-            this.knownScreenAgents.add(addr);
-          }
-          if (next[addr] !== st) {
-            next[addr] = st;
-            changed = true;
-          }
-          const was = prev[addr];
-          if (st === "working") {
-            if (was !== "working") this.screenWorkingSince[addr] = Date.now();
-          } else if (this.screenWorkingSince[addr]) {
-            delete this.screenWorkingSince[addr];
-            changed = true;
-          }
-          if (st === "blocked" && autoInputEnabled()) {
-            const input = pickAutoInput(text);
-            if (input) {
-              const fp = screenFingerprint(text);
-              if (this.autoInputLast[addr] !== fp) {
-                this.autoInputLast[addr] = fp;
-                await hc(["send", addr, input]);
-              }
-            }
-          } else if (st !== "blocked") {
-            delete this.autoInputLast[addr];
-          }
-        }
-        const active = new Set(collectScreenTargets(this.knownScreenAgents));
-        const live = new Map(terminals().filter((t) => t.state === "live").map((t) => [t.address, t]));
-        for (const addr of Object.keys(next)) {
-          if (active.has(addr)) continue;
-          const term = live.get(addr);
-          if (term && (isAgentTerminal(term) || this.knownScreenAgents.has(addr))) continue;
-          delete next[addr];
-          delete this.screenWorkingSince[addr];
+  syncStatus(cx) {
+    const live = new Map(terminals().filter((t) => t.state === "live").map((t) => [t.address, t]));
+    const prev = { ...this.screenByTerminal };
+    const next = {};
+    let changed = false;
+
+    const paneTitles = new Map();
+    for (const p of panes()) {
+      if (p.terminal && p.title) paneTitles.set(p.terminal, p.title);
+    }
+
+    for (const [addr, term] of live.entries()) {
+      const title = paneTitles.get(addr) || term.title || "";
+      const isAgent = isAgentTerminal(term) || isCursorAgentTitle(title) || this.knownAgents.has(addr);
+      if (!isAgent) continue;
+
+      this.knownAgents.add(addr);
+
+      // Detect status from title in memory (0ms)
+      let st = detectCursorFromTitle(title);
+      if (!st) {
+        // If recognized agent but title has no active indicator, it is idle
+        st = "idle";
+      }
+
+      next[addr] = st;
+      if (prev[addr] !== st) {
+        changed = true;
+      }
+
+      const was = prev[addr];
+      if (st === "working") {
+        if (was !== "working" || !this.screenWorkingSince[addr]) {
+          this.screenWorkingSince[addr] = this.screenWorkingSince[addr] || Date.now();
           changed = true;
         }
-        if (!changed && JSON.stringify(next) === JSON.stringify(this.screenByTerminal)) return;
-        this.screenByTerminal = next;
-        publishScreenShared(next, this.screenWorkingSince);
-        cx.notify();
-      } finally {
-        this.screenPolling = false;
-        if (this.screenPending.size) this.pollScreen(cx);
+      } else if (this.screenWorkingSince[addr]) {
+        delete this.screenWorkingSince[addr];
+        changed = true;
       }
-    });
+
+      if (st === "blocked" && autoInputEnabled()) {
+        this.triggerAutoInputIfBlocked(addr);
+      } else if (st !== "blocked") {
+        delete this.autoInputLast[addr];
+      }
+    }
+
+    for (const addr of Object.keys(prev)) {
+      if (!next[addr]) {
+        delete this.screenWorkingSince[addr];
+        changed = true;
+      }
+    }
+
+    for (const addr of this.knownAgents) {
+      if (!live.has(addr)) {
+        this.knownAgents.delete(addr);
+      }
+    }
+
+    if (changed || JSON.stringify(next) !== JSON.stringify(this.screenByTerminal)) {
+      this.screenByTerminal = next;
+      publishScreenShared(next, this.screenWorkingSince);
+      cx?.notify();
+    }
+  }
+
+  async triggerAutoInputIfBlocked(addr) {
+    if (this.autoInputPending.has(addr)) return;
+    this.autoInputPending.add(addr);
+    try {
+      const { text } = await readScreen(addr, 20);
+      const input = pickAutoInput(text);
+      if (input) {
+        const fp = screenFingerprint(text);
+        if (this.autoInputLast[addr] !== fp) {
+          this.autoInputLast[addr] = fp;
+          await hc(["send", addr, input]);
+        }
+      }
+    } catch (_e) {
+    } finally {
+      this.autoInputPending.delete(addr);
+    }
   }
 
   /** Status for sub-agents and parents: OSC / core facts beat screen read. */
@@ -446,6 +453,7 @@ export default class Agents extends View {
     const tabCounts = new Map();
     for (const a of list) tabCounts.set(a.tab, (tabCounts.get(a.tab) ?? 0) + 1);
     const byPriority = sort.id === "priority";
+    const byProject = sort.id === "project";
     const urgency = new Map(list.map((a) => [a.address, Math.max(this.rank(a), ...this.tree(all, a.address).map((s) => RANK[kidStatus(s.t, this.listed, this.coreByTerminal)] ?? 0))]));
     const rankOf = (a) => urgency.get(a.address);
     if (byPriority) list = [...list].sort((x, y) => rankOf(y) - rankOf(x) || this.since(y) - this.since(x) || y.seq - x.seq);
@@ -546,7 +554,8 @@ export default class Agents extends View {
         .child(svg(`mods/workspace-chrome/${isPinned ? "pin-off" : "pin"}.svg`).size(13));
       // Under a space header the space goes without saying; an automatic tab number says nothing.
       // Without a space header above (priority, pinned) the row names its space.
-      const full = byPriority || isPinned;
+      // Project headers name the folder, so the row still says which space it is in.
+      const full = byPriority || isPinned || byProject;
       const name = full ? a.space_name || label(a) : more ?? (/^\d+$/.test(label(a)) ? a.program?.name || label(a) : label(a));
       return h_flex()
         .id(`ag-${a.address}`)
@@ -583,12 +592,32 @@ export default class Agents extends View {
 
     // Groups in list order: spaces (grouped) or priority sections. Agents of a
     // space are next to each other in agents(), so neighbours make a group.
+    // Project view reads the map spaces-plus publishes (repo name, else folder).
+    const projects = shared("spaces.projects") ?? {};
     const groups = pinned.length ? [{ id: "pinned", label: "Pinned", status: null, members: pinned }] : [];
-    for (const a of rest) {
-      const r = rankOf(a) || RANK.idle;
-      const id = byPriority ? `sec-${r}` : `sp-${a.space}`;
-      if (groups.at(-1)?.id === id) groups.at(-1).members.push(a);
-      else groups.push({ id, label: byPriority ? SECTION[r] : a.space_name || "", status: byPriority ? SECTION_STATUS[r] : null, members: [a] });
+    if (byProject) {
+      const order = [];
+      const bucket = new Map();
+      for (const a of rest) {
+        const p = projects[a.space];
+        const key = p?.key || a.space || "other";
+        const id = `pj-${key}`;
+        let g = bucket.get(id);
+        if (!g) {
+          g = { id, label: p?.label || a.space_name || "Other", status: null, members: [] };
+          bucket.set(id, g);
+          order.push(id);
+        }
+        g.members.push(a);
+      }
+      for (const id of order) groups.push(bucket.get(id));
+    } else {
+      for (const a of rest) {
+        const r = rankOf(a) || RANK.idle;
+        const id = byPriority ? `sec-${r}` : `sp-${a.space}`;
+        if (groups.at(-1)?.id === id) groups.at(-1).members.push(a);
+        else groups.push({ id, label: byPriority ? SECTION[r] : a.space_name || "", status: byPriority ? SECTION_STATUS[r] : null, members: [a] });
+      }
     }
 
     // A group's header; it folds the group. Folded, it says how many and the most urgent state.
@@ -657,7 +686,7 @@ export default class Agents extends View {
                 .text_size(11)
                 .text_color(t.dim)
                 .hover((s) => s.text_color(t.foreground))
-                .on_click(() => openOverlay({ mod: "agents-screen", kind: "popup", width: 200, height: 140, props: { sortMenu: true } }))
+                .on_click(() => openOverlay({ mod: "agents-screen", kind: "popup", width: 220, height: 176, props: { sortMenu: true } }))
                 .tooltip(`Sort agents: ${sort.label}`)
                 .child(svg(`mods/workspace-chrome/${sort.icon}.svg`).size(14)))),
         ),

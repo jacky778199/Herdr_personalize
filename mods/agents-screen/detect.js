@@ -69,11 +69,14 @@ export function screenLooksLikeCursor(text) {
   return Boolean(text && CURSOR_SCREEN.test(text));
 }
 
-/** Terminals already confirmed by screen content (or restored from shared). */
+/** Terminals already confirmed by screen content / title (or restored from shared). */
 export function collectScreenTargets(knownScreen) {
-  const known = knownScreen ?? new Set();
-  const live = new Set(terminals().filter((t) => t.state === "live").map((t) => t.address));
-  return [...known].filter((addr) => live.has(addr));
+  const live = terminals().filter((t) => t.state === "live");
+  const out = new Set(knownScreen ?? []);
+  for (const t of live) {
+    if (isAgentTerminal(t)) out.add(t.address);
+  }
+  return [...out].filter((addr) => live.some((t) => t.address === addr));
 }
 
 /** Non-OSC pane terminals to probe with hc read until content matches. */

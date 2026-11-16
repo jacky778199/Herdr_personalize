@@ -94,7 +94,7 @@ export function startCoreSync(cx, { onScreenRefresh }) {
   };
 
   const refreshOne = (addr) => {
-    if (addr && state.screenTargets.has(addr)) onScreenRefresh(addr);
+    if (addr && onScreenRefresh) onScreenRefresh(addr);
   };
 
   const handleEventLine = (line) => {
@@ -144,13 +144,13 @@ export function startCoreSync(cx, { onScreenRefresh }) {
     syncScreenTargetSet();
     const sig = terminals()
       .filter((t) => t.state === "live")
-      .map((t) => `${t.address}\0${t.turn}\0${statusWord(t)}\0${t.status_ms}`)
+      .map((t) => `${t.address}\0${t.turn}\0${statusWord(t)}\0${t.status_ms}\0${t.title ?? ""}`)
       .join("\n");
     const sigChanged = sig !== watchSig;
     watchSig = sig;
     applySnapshot();
-    if (sigChanged) {
-      for (const addr of state.screenTargets) onScreenRefresh(addr);
+    if (sigChanged && onScreenRefresh) {
+      onScreenRefresh();
     }
   };
 

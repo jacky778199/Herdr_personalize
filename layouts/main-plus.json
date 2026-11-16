@@ -140,6 +140,27 @@
                       "content": {
                         "mod": "changes"
                       }
+                    },
+                    {
+                      "id": "inspector",
+                      "type": "block",
+                      "content": {
+                        "mod": "agent-inspector"
+                      }
+                    },
+                    {
+                      "id": "git",
+                      "type": "block",
+                      "content": {
+                        "mod": "git-graph"
+                      }
+                    },
+                    {
+                      "id": "usage",
+                      "type": "block",
+                      "content": {
+                        "mod": "cursor-usage"
+                      }
                     }
                   ],
                   "active": "files"
