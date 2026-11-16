@@ -6,7 +6,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { panes, props, run, theme, home, shared, setShared, spaces, openOverlay, focused } from "herdr";
+import { panes, terminals, props, run, theme, home, shared, setShared, spaces, openOverlay, focused } from "herdr";
 import { fetchAgentTaskFlow } from "./transcript.js";
 
 let pasteSeen = 0;
@@ -43,6 +43,51 @@ function folder(cwd) {
   if (!cwd) return "";
   const h = home();
   return cwd === h ? "~" : cwd.startsWith(h + "/") ? "~" + cwd.slice(h.length) : cwd;
+}
+
+function cleanTitleForMatch(s) {
+  return String(s ?? "")
+    .replace(/^[^\p{L}\p{N}]+/u, "")
+    .replace(/\s*[-–—]\s*(?:[⏳⌨️🧭📝📂📤🔄📋🔐❓✅]|Working|Ready|Waiting|Running|Planning|Reviewing).*$/i, "")
+    .trim()
+    .toLowerCase();
+}
+
+function matchPaneSession(p, tab, cleanPrompt) {
+  const sessionStats = shared("cursor.sessionStats");
+  if (!sessionStats || !p?.terminal) return null;
+
+  const tm = terminals().find((x) => x.address === p.terminal);
+  const argv = [...(tm?.argv ?? []), ...(tm?.foreground?.argv ?? [])].join(" ");
+  const idHit = argv.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  let s = idHit ? sessionStats.by_id?.[idHit[0]] : null;
+
+  if (!s && sessionStats.by_title) {
+    const candidates = [
+      cleanTitleForMatch(p.title),
+      cleanTitleForMatch(tab?.name),
+      cleanTitleForMatch(cleanPrompt),
+    ].filter((x) => x.length >= 2);
+
+    for (const key of candidates) {
+      if (sessionStats.by_title[key]) { s = sessionStats.by_title[key]; break; }
+    }
+    if (!s) {
+      for (const key of candidates) {
+        if (key.length < 4) continue;
+        const entry = Object.entries(sessionStats.by_title).find(([tk]) => tk.includes(key) || key.includes(tk));
+        if (entry) { s = entry[1]; break; }
+      }
+    }
+  }
+
+  if (!s) return null;
+  const modelLabel = s.short_model || s.model;
+  return {
+    text: modelLabel ? `${modelLabel} · ${s.cost_str}` : s.cost_str,
+    cents: s.cents || 0,
+    tip: `模型: ${s.model || "unknown"}\n今日花費: ${s.cost_str} (${s.calls} calls)\n對話: ${s.title}\n點擊開啟 Cursor 用量面板`,
+  };
 }
 
 export default class Pane extends View {
@@ -146,7 +191,8 @@ export default class Pane extends View {
     const pic = icon(p.program, 14, t.dim);
     const st = paneStatus(p);
     const pane = p.pane;
-    const tabIndex = spaces().flatMap((s) => s.tabs).find((tab) => tab.id === p.tab)?.index;
+    const tab = spaces().flatMap((s) => s.tabs).find((tb) => tb.id === p.tab);
+    const tabIndex = tab?.index;
 
     // 當前 task 的簡短摘要 (只在判定為 Agent 終端且有專屬 task 時顯示)
     const latestTask = st ? this.taskFlow?.tasks?.[this.taskFlow.tasks.length - 1] : null;
@@ -161,6 +207,7 @@ export default class Pane extends View {
     const taskTitle = cleanPrompt
       ? (cleanPrompt.length > 25 ? cleanPrompt.slice(0, 24) + "…" : cleanPrompt)
       : null;
+    const sess = matchPaneSession(p, tab, cleanPrompt);
 
     return h_flex()
       .id(`pane-head-${pane}`)
@@ -255,6 +302,29 @@ export default class Pane extends View {
           .on_click((e, cx) => this.openNotesPopup(p, e, cx))
           .child(div().text_size(11).child("📝"))
           .child(div().text_size(11).font_medium().text_color(t.foreground).child("小筆記"))
+      ))
+      .when(Boolean(sess), (el) => el.child(
+        div()
+          .id(`pane-sess-${pane}`)
+          .flex_none()
+          .px(6)
+          .py(1.5)
+          .rounded(4)
+          .bg(t.chrome)
+          .border(1)
+          .border_color(t.border)
+          .text_size(10.5)
+          .font_medium()
+          .text_color(sess.cents >= 100 ? (t.ansi3 ?? "#f59e0b") : t.muted)
+          .cursor_pointer()
+          .hover((s) => s.bg(t.hover).text_color(t.foreground))
+          .tooltip(sess.tip)
+          .on_click((_e, cx) => {
+            cx.stop_propagation();
+            run("layout.show", { id: "panel" });
+            run("layout.select", { id: "panel-body", child: "usage" });
+          })
+          .child(sess.text)
       ))
       .child(div().flex_1().truncate().text_color(t.dim).child(folder(p.cwd)))
       .when(st === "working", el => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
