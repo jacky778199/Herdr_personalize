@@ -11,7 +11,7 @@ export default class TaskFlowPopup extends View {
     const p = props() ?? {};
     this.terminal = p.terminal ?? "";
     this.flow = p.flow ?? (this.terminal ? shared(`task-flow:${this.terminal}`) : null);
-    this.expandedSteps = new Set([0]); // 預設展開最新一筆的完整實作步驟
+    this.expandedSteps = new Set(); // 預設精簡顯示最近 5 步，讓單一任務的 Prompt / 花費 / 過程 / 結果能一次全覽
 
     // 啟動時立刻非同步校驗最新狀態，保持 0 延遲開窗同時更新
     cx.spawn(async (cx) => {
@@ -185,7 +185,7 @@ export default class TaskFlowPopup extends View {
                       const isLatest = idx === 0;
                       const steps = task.steps ?? [];
                       const isExpanded = this.expandedSteps.has(idx);
-                      const displaySteps = isExpanded ? steps : steps.slice(-4);
+                      const displaySteps = isExpanded ? steps : steps.slice(-5);
                       const hiddenStepsCount = steps.length - displaySteps.length;
                       const resultText = task.result || task.summary || "";
 
@@ -292,7 +292,7 @@ export default class TaskFlowPopup extends View {
                                       .text_color(t.muted)
                                       .child(`3. 實作過程 (${steps.length} 個步驟)`)
                                   )
-                                  .when(steps.length > 4, (btnEl) =>
+                                  .when(steps.length > 5, (btnEl) =>
                                     btnEl.child(
                                       div()
                                         .id(`toggle-steps-${idx}`)

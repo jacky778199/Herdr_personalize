@@ -142,8 +142,8 @@ export default class Pane extends View {
     openOverlay({
       mod: "task-flow",
       kind: "popup",
-      width: 960,
-      height: 740,
+      width: 1020,
+      height: 920,
       props: {
         terminal: p.terminal,
         cwd: p.cwd,
