@@ -161,6 +161,13 @@
                       "content": {
                         "mod": "cursor-usage"
                       }
+                    },
+                    {
+                      "id": "worklog",
+                      "type": "block",
+                      "content": {
+                        "mod": "worklog"
+                      }
                     }
                   ],
                   "active": "files"
@@ -189,6 +196,16 @@
         }
       ],
       "resizable": false
+    },
+    {
+      "id": "b1336f67f5a96b0cbfaea1e5d5ae6f5fc",
+      "type": "block",
+      "content": {
+        "mod": "worklog"
+      },
+      "size": {
+        "px": 320
+      }
     }
   ],
   "background": "canvas",

@@ -43,6 +43,8 @@ mods/cursor-usage/model_fees_cache.json
 !mods/workspace-chrome-plus/**
 !mods/workspace-status-plus/
 !mods/workspace-status-plus/**
+!mods/worklog/
+!mods/worklog/**
 
 mods/**/jsconfig.json
 mods/**/gpui-kit.d.ts

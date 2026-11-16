@@ -120,7 +120,7 @@ export default class Tabs extends View {
       ? Math.max(10, (root.traffic_lights[0] + 64) / settings().zoom - (sidebar?.hidden ? 0 : sidebar?.size?.px ?? 0))
       : 10;
     const panel = find(root, "panel"), body = find(root, "panel-body");
-    const enabled = [...new Set([...(shared("workspace.panels") ?? ["files", "changes"]), "inspector", "git", "usage"])];
+    const enabled = [...new Set([...(shared("workspace.panels") ?? ["files", "changes"]), "inspector", "git", "usage", "worklog"])];
     this.syncPanel(space, panel, body, enabled);
     const panelButton = (id, label, icon) => {
       const on = panel && !panel.hidden && body?.active === id;
@@ -142,6 +142,7 @@ export default class Tabs extends View {
       .when(enabled.includes("inspector"), el => el.child(panelButton("inspector", "Inspector", "mods/agent-inspector/icons/gauge.svg")))
       .when(enabled.includes("git"), el => el.child(panelButton("git", "Git", "mods/git-graph/icons/graph.svg")))
       .when(enabled.includes("usage"), el => el.child(panelButton("usage", "Usage", "mods/cursor-usage/icons/coins.svg")))
+      .when(enabled.includes("worklog"), el => el.child(panelButton("worklog", "Worklog", "mods/task-notes/book.svg")))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs-timer/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs-timer/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/tabs-timer/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));
