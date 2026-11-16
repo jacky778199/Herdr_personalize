@@ -5,6 +5,78 @@ $ZipUrl  = "https://github.com/jacky778199/Herdr_personalize/archive/refs/heads/
 $HerdrHome = if ($env:HERDR_APP_HOME) { $env:HERDR_APP_HOME } else { Join-Path $env:USERPROFILE ".config\herdr-app" }
 $TmpDir = Join-Path $env:TEMP ("herdr-personalize-" + [System.Guid]::NewGuid().ToString("N").Substring(0, 8))
 
+function Find-HerdrExe {
+  # 1. PATH
+  $cmd = Get-Command "herdr-app" -ErrorAction SilentlyContinue
+  if ($cmd -and $cmd.Source -and (Test-Path $cmd.Source)) {
+    return $cmd.Source
+  }
+
+  # 2. Common install locations
+  $candidates = @(
+    (Join-Path $env:LOCALAPPDATA "Programs\herdr-app\herdr-app.exe"),
+    (Join-Path $env:LOCALAPPDATA "herdr-app\herdr-app.exe"),
+    (Join-Path $env:ProgramFiles "herdr-app\herdr-app.exe"),
+    (Join-Path $env:ProgramFiles "Herdr\herdr-app.exe"),
+    (Join-Path ${env:ProgramFiles(x86)} "herdr-app\herdr-app.exe"),
+    (Join-Path $env:USERPROFILE "scoop\apps\herdr-app\current\herdr-app.exe"),
+    (Join-Path $env:USERPROFILE ".cargo\bin\herdr-app.exe")
+  ) | Where-Object { $_ -and (Test-Path $_) }
+  if ($candidates) {
+    return ($candidates | Select-Object -First 1)
+  }
+
+  # 3. Windows Registry (App Paths & Uninstall entries)
+  $regPaths = @(
+    "HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\herdr-app.exe",
+    "HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\herdr-app.exe",
+    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+    "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+    "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+  )
+  foreach ($rp in $regPaths) {
+    $items = Get-ItemProperty $rp -ErrorAction SilentlyContinue
+    foreach ($it in $items) {
+      if ($it.'(default)' -and (Test-Path $it.'(default)')) {
+        return $it.'(default)'
+      }
+      if ($it.DisplayName -like "*herdr*" -or $it.DisplayIcon -like "*herdr-app*") {
+        if ($it.InstallLocation) {
+          $p = Join-Path $it.InstallLocation "herdr-app.exe"
+          if (Test-Path $p) { return $p }
+        }
+        if ($it.DisplayIcon) {
+          $iconPath = ($it.DisplayIcon -split ",")[0].Trim('"')
+          if ($iconPath -like "*herdr-app.exe" -and (Test-Path $iconPath)) { return $iconPath }
+        }
+      }
+    }
+  }
+
+  # 4. Start Menu / Desktop shortcuts
+  $shortcutDirs = @(
+    [Environment]::GetFolderPath("Programs"),
+    [Environment]::GetFolderPath("CommonPrograms"),
+    [Environment]::GetFolderPath("Desktop")
+  ) | Where-Object { $_ -and (Test-Path $_) }
+  if ($shortcutDirs) {
+    $shell = New-Object -ComObject WScript.Shell
+    foreach ($dir in $shortcutDirs) {
+      $lnks = Get-ChildItem -Path $dir -Filter "*herdr*.lnk" -Recurse -ErrorAction SilentlyContinue
+      foreach ($lnk in $lnks) {
+        try {
+          $target = $shell.CreateShortcut($lnk.FullName).TargetPath
+          if ($target -and ($target -like "*herdr-app.exe") -and (Test-Path $target)) {
+            return $target
+          }
+        } catch {}
+      }
+    }
+  }
+
+  return $null
+}
+
 Write-Host "==> Installing Herdr Personalize mods to: $HerdrHome" -ForegroundColor Cyan
 
 try {
@@ -50,17 +122,19 @@ try {
     }
   }
 
-  # 3. Switch Herdr layout to main-plus if herdr-app CLI is available
-  if (Get-Command herdr-app -ErrorAction SilentlyContinue) {
+  # 3. Locate herdr-app.exe automatically and switch layout to main-plus
+  $HerdrExe = Find-HerdrExe
+  if ($HerdrExe) {
+    Write-Host "    Found Herdr: $HerdrExe" -ForegroundColor DarkGray
     Write-Host "    Switching Herdr layout to main-plus ..."
     try {
-      herdr-app do layout.switch --name main-plus | Out-Null
+      & $HerdrExe do layout.switch --name main-plus | Out-Null
       Write-Host "    [+] Active layout switched to main-plus" -ForegroundColor Green
     } catch {
       Write-Host "    [!] Herdr window not running; open Herdr and select layout 'main-plus'." -ForegroundColor Yellow
     }
   } else {
-    Write-Host "    [!] herdr-app CLI not in PATH; open Herdr and switch layout to 'main-plus'." -ForegroundColor Yellow
+    Write-Host "    [!] herdr-app.exe not found on this machine. Please install Herdr Desktop first, then switch layout to 'main-plus'." -ForegroundColor Yellow
   }
 
   Write-Host "`nDone! Restart or focus Herdr to use all mods (including Cursor Usage panel)." -ForegroundColor Cyan
