@@ -168,6 +168,13 @@
                       "content": {
                         "mod": "worklog"
                       }
+                    },
+                    {
+                      "id": "note",
+                      "type": "block",
+                      "content": {
+                        "mod": "note"
+                      }
                     }
                   ],
                   "active": "files"
@@ -196,6 +203,16 @@
         }
       ],
       "resizable": false
+    },
+    {
+      "id": "bd15e8b607403ebc126b8d41ffb3268fe",
+      "type": "block",
+      "content": {
+        "mod": "note"
+      },
+      "size": {
+        "px": 320
+      }
     }
   ],
   "background": "canvas",
