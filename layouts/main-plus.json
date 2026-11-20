@@ -117,7 +117,8 @@
                   "gap": 8,
                   "lone": true
                 }
-              }
+              },
+              "resizable": false
             },
             {
               "id": "panel",
@@ -139,13 +140,6 @@
                       "type": "block",
                       "content": {
                         "mod": "changes"
-                      }
-                    },
-                    {
-                      "id": "inspector",
-                      "type": "block",
-                      "content": {
-                        "mod": "agent-inspector"
                       }
                     },
                     {
@@ -181,11 +175,12 @@
                 }
               ],
               "size": {
-                "px": 368
+                "px": 360
               },
-              "min": 280,
-              "max": 900,
-              "hidden": true
+              "min": 360,
+              "max": 360,
+              "hidden": true,
+              "resizable": false
             }
           ],
           "padding": 8,
@@ -203,16 +198,6 @@
         }
       ],
       "resizable": false
-    },
-    {
-      "id": "bd15e8b607403ebc126b8d41ffb3268fe",
-      "type": "block",
-      "content": {
-        "mod": "note"
-      },
-      "size": {
-        "px": 320
-      }
     }
   ],
   "background": "canvas",

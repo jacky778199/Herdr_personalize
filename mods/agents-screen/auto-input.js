@@ -1,3 +1,5 @@
+// Agents-screen no longer reads the terminal to press Enter. That stays in the
+// user.auto-enter plugin so the screen read is not on the UI thread.
 import { shared } from "herdr";
 
 export function autoInputEnabled() {
