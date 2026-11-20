@@ -84,8 +84,10 @@ export function startCoreSync(cx, { onScreenRefresh }) {
     const json = JSON.stringify(byTerminal);
     const changed = json !== state.lastJson;
     state.lastJson = json;
-    publishCoreShared(byTerminal, workingSince);
-    if (changed) cx.notify();
+    if (changed) {
+      publishCoreShared(byTerminal, workingSince);
+      cx.notify();
+    }
     return changed;
   };
 
@@ -156,7 +158,9 @@ export function startCoreSync(cx, { onScreenRefresh }) {
 
   syncFromTerminals();
 
-  cx.timer.every(1000, syncFromTerminals);
+  cx.timer.after(1500, (cx) => {
+    cx.timer.every(2000, syncFromTerminals);
+  });
 
   cx.spawn(async () => {
     try {

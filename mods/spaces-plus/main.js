@@ -71,7 +71,7 @@ const idPart = (s) => {
 };
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
 // for this often, in repos the list shows, while the window is in front.
-const FALLBACK = 60000;
+const FALLBACK = 120000;
 
 // What a stored color name looks like on an avatar (the same in every mod
 // that draws space avatars): one strong color per hue, light and dark alike.
@@ -130,9 +130,11 @@ export default class Spaces extends View {
     this.refreshMachines(cx);
     cx.timer.every(15000, cx => this.refreshMachines(cx));
     this.refreshUsage(cx);
-    cx.timer.every(30000, cx => this.refreshUsage(cx));
+    cx.timer.every(120000, cx => this.refreshUsage(cx));
     // Refresh only when the refs could have changed (see `due`).
-    cx.timer.every(250, (cx) => this.checkNew(cx));
+    cx.timer.after(750, (cx) => {
+      cx.timer.every(1500, (cx) => this.checkNew(cx));
+    });
   }
 
   checkNew(cx) {
@@ -186,6 +188,7 @@ export default class Spaces extends View {
 
   refreshUsage(cx) {
     if (this.sampling) return;
+    if (Object.keys(this.usage).length > 0 && !window().active) return;
     this.sampling = true;
     cx.spawn(async (cx) => {
       try {
@@ -675,7 +678,7 @@ export default class Spaces extends View {
     if (agent.working > 0) {
       return h_flex().flex_none().gap(3).items_center()
         .tooltip(`${agent.working} 個 Agent 執行中`)
-        .child(svg("mods/workspace-chrome/spinner.svg").size(11).flex_none().text_color(t.working ?? t.accent).spin(900))
+        .child(div().size(6).flex_none().rounded(3).bg(t.working ?? t.accent))
         .when(agent.working > 1, (el) => el.child(div().text_size(10).text_color(t.working ?? t.accent).child(String(agent.working))));
     }
     if (agent.done > 0) {

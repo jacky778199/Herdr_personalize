@@ -3,21 +3,17 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout, hc, nextCommand } from "herdr";
+import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout, nextCommand } from "herdr";
 import {
-  readScreen,
   publishScreenShared,
 } from "./detect.js";
 import {
   detectCursorFromTitle,
   isCursorAgentTitle,
 } from "./rules-cursor.js";
-import { autoInputEnabled, pickAutoInput, screenFingerprint } from "./auto-input.js";
 import { startCoreSync } from "./core-sync.js";
 import { statusWord } from "./status-word.js";
 import { agentArgv, isAgentTerminal } from "./agent-terminal.js";
-import { buildTabIndex, canonicalTabId, tabIdFromTerminal } from "./tab-resolve.js";
-
 function find(node, id) {
   if (node?.id === id) return node;
   for (const child of node?.children ?? []) {
@@ -43,21 +39,51 @@ const clean = (s) => (s ?? "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
 
 const AGENT_LAUNCH = /\bcursor-agent\b|\bagent(?:\.exe)?\b|\.local\/bin\/agent\b|claude(?:-code)?\b|codex\b|\bgemini\b|aider\b|\bpi\b|agent-sdk/i;
 
-function agentKnownByScreen(address) {
-  const known = shared("screen-status.by-terminal") ?? {};
-  return address in known;
+// Programs such as cursor-agent often run inside pwsh and don't emit OSC 7501 yet.
+function tabIndexFrom(spaceList) {
+  const map = new Map();
+  for (const sp of spaceList) {
+    for (const tab of sp.tabs ?? []) {
+      const loc = {
+        space: sp.id,
+        space_name: sp.name,
+        tab_index: tab.index,
+        tab_name: tab.name,
+        tab_id: tab.id,
+      };
+      map.set(tab.id, loc);
+      const slash = tab.id.indexOf("/");
+      if (slash > 0) map.set(tab.id.slice(slash + 1), loc);
+    }
+  }
+  return map;
 }
 
-// Programs such as cursor-agent often run inside pwsh and don't emit OSC 7501 yet.
-function unreportedAgents(listed) {
+function canonicalFrom(spaceList, tabId, terminalAddress) {
+  if (!tabId) return tabId;
+  for (const sp of spaceList) {
+    if (sp.tabs?.some((tab) => tab.id === tabId)) return tabId;
+  }
+  const machine = terminalAddress?.includes("/") ? terminalAddress.split("/")[0] : null;
+  if (!machine) return tabId;
+  const qualified = `${machine}/${tabId}`;
+  for (const sp of spaceList) {
+    if (sp.tabs?.some((tab) => tab.id === qualified)) return qualified;
+  }
+  return tabId;
+}
+
+function unreportedAgents(listed, host) {
   const have = new Set(listed.map((a) => a.address));
-  const tabs = buildTabIndex();
-  const live = new Map(terminals().filter((t) => t.state === "live").map((t) => [t.address, t]));
+  const spaceList = host.spaces;
+  const tabs = tabIndexFrom(spaceList);
+  const known = host.screen;
+  const live = new Map(host.terminals.filter((t) => t.state === "live").map((t) => [t.address, t]));
   const extras = [];
 
   const push = (term, pane, tabKey, loc) => {
     if (!term || have.has(term.address)) return;
-    const tabId = canonicalTabId(tabKey ?? loc?.tab_id, term.address);
+    const tabId = canonicalFrom(spaceList, tabKey ?? loc?.tab_id, term.address);
     have.add(term.address);
     extras.push({
       address: term.address,
@@ -77,23 +103,23 @@ function unreportedAgents(listed) {
     });
   };
 
-  for (const p of panes()) {
+  for (const p of host.panes) {
     if (!p.terminal || have.has(p.terminal)) continue;
     const term = live.get(p.terminal);
     if (!term || p.status != null) continue;
     if (!p.program?.agent && !AGENT_LAUNCH.test(agentArgv(term)) && !isAgentTerminal(term)
-      && !agentKnownByScreen(p.terminal)) continue;
-    const loc = tabs.get(p.tab) ?? tabs.get(canonicalTabId(p.tab, p.terminal));
+      && !known[p.terminal]) continue;
+    const loc = tabs.get(p.tab) ?? tabs.get(canonicalFrom(spaceList, p.tab, p.terminal));
     if (!loc) continue;
     push(term, p, p.tab, loc);
   }
 
   for (const term of live.values()) {
     if (have.has(term.address)) continue;
-    if (!isAgentTerminal(term) && !AGENT_LAUNCH.test(agentArgv(term)) && !agentKnownByScreen(term.address)) continue;
-    const tabId = tabIdFromTerminal(term);
+    if (!isAgentTerminal(term) && !AGENT_LAUNCH.test(agentArgv(term)) && !known[term.address]) continue;
+    const tabId = canonicalFrom(spaceList, term.labels?.["herdr.tab"], term.address);
     if (!tabId) continue;
-    const pane = panes().find((p) => p.terminal === term.address);
+    const pane = host.panes.find((p) => p.terminal === term.address);
     if (pane?.status != null) continue;
     const loc = tabs.get(tabId) ?? tabs.get(term.labels?.["herdr.tab"]);
     if (!loc) continue;
@@ -135,6 +161,21 @@ const sortOf = () => SORTS.find((s) => s.id === shared("agents.sort")) ?? SORTS[
 const SECTION = { 4: "Needs you", 3: "Done", 2: "Working", 1: "Idle" };
 const SECTION_STATUS = { 4: "blocked", 3: "done", 2: "working" };
 
+function withAlpha(color, alpha) {
+  if (typeof color !== "string") return color;
+  if (color.length === 7) return color + alpha;
+  if (color.length === 9) return color.slice(0, 7) + alpha;
+  return color;
+}
+
+function folderName(cwd) {
+  if (!cwd) return "";
+  const cleanPath = String(cwd).replace(/[\\/]+$/, "");
+  if (!cleanPath) return "";
+  const parts = cleanPath.split(/[\\/]/);
+  return parts[parts.length - 1] || cleanPath;
+}
+
 function duration(ms) {
   const m = Math.floor(ms / 60000);
   if (m < 1) return "<1m";
@@ -160,11 +201,9 @@ export default class Agents extends View {
     this.migratingPins = new Set();
     this.screenByTerminal = shared("screen-status.by-terminal") ?? {};
     this.screenWorkingSince = {};
-    this.autoInputLast = {};
-    this.autoInputPending = new Set();
     this.knownAgents = new Set(Object.keys(shared("screen-status.by-terminal") ?? {}));
-    if (shared("cursor.auto-input") === undefined) setShared("cursor.auto-input", false);
     cx.timer.every(30000, (cx) => cx.notify());
+    this.hostRev = 0;
     startCoreSync(cx, {
       onScreenRefresh: () => this.syncStatus(cx),
     });
@@ -176,8 +215,10 @@ export default class Agents extends View {
         }
       }
     });
-    cx.timer.every(1000, (cx) => this.syncStatus(cx));
     this.syncStatus(cx);
+    cx.timer.after(1000, (cx) => {
+      cx.timer.every(2000, (cx) => this.syncStatus(cx));
+    });
   }
 
   queueScreenRead(_addr, cx) {
@@ -224,12 +265,6 @@ export default class Agents extends View {
         delete this.screenWorkingSince[addr];
         changed = true;
       }
-
-      if (st === "blocked" && autoInputEnabled()) {
-        this.triggerAutoInputIfBlocked(addr);
-      } else if (st !== "blocked") {
-        delete this.autoInputLast[addr];
-      }
     }
 
     for (const addr of Object.keys(prev)) {
@@ -248,33 +283,41 @@ export default class Agents extends View {
     if (changed || JSON.stringify(next) !== JSON.stringify(this.screenByTerminal)) {
       this.screenByTerminal = next;
       publishScreenShared(next, this.screenWorkingSince);
+      this.hostRev = (this.hostRev || 0) + 1;
       cx?.notify();
     }
   }
 
-  async triggerAutoInputIfBlocked(addr) {
-    if (this.autoInputPending.has(addr)) return;
-    this.autoInputPending.add(addr);
-    try {
-      const { text } = await readScreen(addr, 20);
-      const input = pickAutoInput(text);
-      if (input) {
-        const fp = screenFingerprint(text);
-        if (this.autoInputLast[addr] !== fp) {
-          this.autoInputLast[addr] = fp;
-          await hc(["send", addr, input]);
-        }
-      }
-    } catch (_e) {
-    } finally {
-      this.autoInputPending.delete(addr);
-    }
+  // agents(), terminals(), panes() and spaces() copy the whole list. Keep one
+  // copy for 2s so a redraw does not take them again. Sort and focus stay live.
+  hostLists() {
+    const sort = sortOf();
+    const focus = focused()?.agent || "";
+    const now = Date.now();
+    const prev = this._host;
+    if (prev && now - prev.at < 2000 && prev.rev === (this.hostRev || 0) && prev.sortId === sort.id && prev.focus === focus) return prev;
+    const snap = {
+      at: now,
+      rev: this.hostRev || 0,
+      sortId: sort.id,
+      sort,
+      focus,
+      agents: agents(),
+      terminals: terminals(),
+      panes: panes(),
+      spaces: spaces(),
+      core: shared("core-status.by-terminal") ?? {},
+      projects: shared("spaces.projects") ?? {},
+      screen: shared("screen-status.by-terminal") ?? {},
+    };
+    this._host = snap;
+    return snap;
   }
 
   /** Status for sub-agents and parents: OSC / core facts beat screen read. */
   mergeListedStatuses(list, all) {
     const map = new Map(list.map((a) => [a.address, a.status]));
-    const core = shared("core-status.by-terminal") ?? {};
+    const core = this.coreByTerminal ?? {};
     for (const a of list) {
       if (core[a.address]) map.set(a.address, core[a.address]);
     }
@@ -288,8 +331,8 @@ export default class Agents extends View {
     return map;
   }
 
-  applyScreenToList(list) {
-    const osc = new Set(agents().map((a) => a.address));
+  applyScreenToList(list, official) {
+    const osc = new Set(official.map((a) => a.address));
     const screen = this.screenByTerminal ?? {};
     for (const a of list) {
       if (osc.has(a.address) || !screen[a.address]) continue;
@@ -394,14 +437,13 @@ export default class Agents extends View {
     });
   }
 
-  subRow(t, s, shown, compact) {
+  subRow(t, s, shown, _compact) {
     const k = s.t;
     const st = kidStatus(k, this.listed, this.coreByTerminal);
-    const pic = icon(k.program, 14, t.foreground);
     const on = k.address === shown;
     return h_flex()
       .id(`sub-${k.address}`)
-      .pl(39)
+      .pl(18)
       .pr(8)
       .rounded(8)
       .h(26)
@@ -415,15 +457,14 @@ export default class Agents extends View {
       .children(s.lines.map(l => div().self_start().mt(-4).w(9).h(17).mr(4).flex_none()
         .when(Boolean(l), el => el.border_l(1.5).border_color(t.input))
         .when(l === "└" || l === "├", el => el.border_b(1.5).rounded_bl(6))))
-      .when(Boolean(pic), el => el.child(div().mr(8).child(pic)))
       .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).child(k.name || k.template || k.program?.name || k.address))
-      .child(this.status(t, { status: st }, compact));
+      .child(this.status(t, { status: st }, true));
   }
 
   // compact: a ! for blocked where a header already says "Needs you".
   status(t, a, compact = false) {
     const color = t[a.status] ?? t.dim;
-    if (a.status === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).mx(1).flex_none().text_color(t.working).spin(900);
+    if (a.status === "working") return div().size(7).mx(3).flex_none().rounded(4).bg(color);
     if (a.status === "blocked" && compact) return div().size(14).flex_none().rounded(4).bg(t.blocked + "26").text_size(10.5).font_bold().text_color(t.blocked).flex().items_center().justify_center().child("!");
     if (a.status === "blocked") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).flex().items_center().child("Needs you");
     // Idle: a ring; done: a dot.
@@ -434,12 +475,13 @@ export default class Agents extends View {
   render(cx) {
     const t = theme();
     if (props()?.sortMenu) return this.sortMenu(t);
+    const host = this.hostLists();
     const collapsed = narrow();
-    const sort = sortOf();
-    let list = [...agents(), ...unreportedAgents(agents())];
-    this.applyScreenToList(list);
-    const all = terminals();
-    this.coreByTerminal = shared("core-status.by-terminal") ?? {};
+    const sort = host.sort;
+    let list = [...host.agents, ...unreportedAgents(host.agents, host)];
+    this.applyScreenToList(list, host.agents);
+    const all = host.terminals;
+    this.coreByTerminal = host.core;
     this.listed = this.mergeListedStatuses(list, all);
     this.migratePins(all);
     const shown = focused()?.agent;
@@ -499,8 +541,12 @@ export default class Agents extends View {
     // agent's own title, never an automatic tab number unless two rows would
     // otherwise read the same.
     // Read the pane snapshot once: every host read copies the whole list into JS.
-    const leads = leadPanes(panes());
-    const tabs = new Map(spaces().flatMap(s => s.tabs).map(tab => [tab.id, tab]));
+    const allPanes = host.panes;
+    const leads = leadPanes(allPanes);
+    const paneByTerminal = new Map(allPanes.filter((p) => p.terminal).map((p) => [p.terminal, p]));
+    const termByAddr = new Map(all.map((term) => [term.address, term]));
+    const projects = host.projects;
+    const tabs = new Map(host.spaces.flatMap(s => s.tabs ?? []).map(tab => [tab.id, tab]));
     const labels = new Map(list.map(a => {
       const tab = tabs.get(a.tab);
       const many = tabCounts.get(a.tab) > 1;
@@ -515,10 +561,11 @@ export default class Agents extends View {
     }
 
     const row = (a, i, subs = []) => {
-      const pic = icon(a.program, 16, t.foreground);
       const more = detail.get(a.address);
-      // An agent on another machine (`vps/t7`) says which.
-      const machine = a.address.includes("/") ? a.address.split("/")[0] : null;
+      const machine = a.address.includes("/") ? a.address.split("/")[0] : "local";
+      const cwd = paneByTerminal.get(a.address)?.cwd || termByAddr.get(a.address)?.cwd || "";
+      const folder = folderName(cwd) || projects[a.space]?.label || a.space_name || "";
+      const meta = folder ? `${machine} \u00b7 ${folder}` : machine;
       if (collapsed) {
         return h_flex()
           .id(`ag-${a.address}`)
@@ -549,23 +596,21 @@ export default class Agents extends View {
           run("terminal.pin", { terminal: a.address, pinned: !isPinned });
           // The row moves away from under the pointer, and no hover-out comes.
           this.hovered = null;
+          this.hostRev = (this.hostRev || 0) + 1;
           cx.notify();
         })
         .child(svg(`mods/workspace-chrome/${isPinned ? "pin-off" : "pin"}.svg`).size(13));
-      // Under a space header the space goes without saying; an automatic tab number says nothing.
-      // Without a space header above (priority, pinned) the row names its space.
-      // Project headers name the folder, so the row still says which space it is in.
-      const full = byPriority || isPinned || byProject;
-      const name = full ? a.space_name || label(a) : more ?? (/^\d+$/.test(label(a)) ? a.program?.name || label(a) : label(a));
-      return h_flex()
+      const primaryTitle = more ?? (/^\d+$/.test(label(a)) ? a.program?.name || label(a) : label(a));
+      return v_flex()
         .id(`ag-${a.address}`)
         .px(8)
-        .h(30)
+        .py(4)
         .flex_none()
         .rounded(8)
-        .items_center()
-        .gap(9)
-        .when(a.focused, (el) => el.bg(t.selected))
+        .gap(1)
+        .bg(a.focused ? t.selected : withAlpha(t.raised, "55"))
+        .border(1)
+        .border_color(a.focused ? t.border : withAlpha(t.border, "66"))
         .cursor_pointer()
         .hover((s) => s.bg(t.hover))
         .on_hover((on, cx) => {
@@ -574,26 +619,36 @@ export default class Agents extends View {
           cx.notify();
         })
         .on_click(() => (a.pane ? run("pane.focus", { pane: a.pane }) : run("pane.focus", { terminal: a.address })))
-        .when(Boolean(pic), el => el.child(div().id(`agent-fold-${a.address}`)
-          .when(subs.length > 0, el => el.on_click((_e, cx) => {
-            cx.stop_propagation();
-            this.folded.has(a.address) ? this.folded.delete(a.address) : this.folded.add(a.address);
-            cx.notify();
-          })).child(pic)))
-        .child(h_flex().flex_1().min_w(0).gap(5).items_center()
-          .child(div().min_w(0).max_w(full && more ? 120 : 200).truncate().text_color(idle ? t.muted : t.foreground).child(name))
-          .when(full && Boolean(more), el => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`\u00b7 ${more}`))))
-        .when(Boolean(machine), el => el.child(div().text_size(10).text_color(t.dim).child(machine)))
-        .when(subs.length > 0, el => el.child(fold(a, subs)))
-        .when(this.hovered === a.address, el => el.child(pin))
-        .when(this.hovered !== a.address && Boolean(when), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - when))))
-        .child(this.status(t, a, byPriority && !isPinned));
+        .child(
+          div()
+            .w_full()
+            .min_w(0)
+            .truncate()
+            .text_size(12.5)
+            .text_color(idle ? t.muted : t.foreground)
+            .child(primaryTitle),
+        )
+        .child(
+          h_flex()
+            .w_full()
+            .min_w(0)
+            .items_center()
+            .gap(6)
+            .text_size(11)
+            .child(div().min_w(0).truncate().text_color(t.dim).child(meta))
+            .child(div().flex_1())
+            .when(subs.length > 0, (el) => el.child(fold(a, subs)))
+            .when(this.hovered === a.address, (el) => el.child(pin))
+            .when(this.hovered !== a.address && Boolean(when), (el) =>
+              el.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - when))),
+            )
+            .child(this.status(t, a, true)),
+        );
     };
 
     // Groups in list order: spaces (grouped) or priority sections. Agents of a
     // space are next to each other in agents(), so neighbours make a group.
     // Project view reads the map spaces-plus publishes (repo name, else folder).
-    const projects = shared("spaces.projects") ?? {};
     const groups = pinned.length ? [{ id: "pinned", label: "Pinned", status: null, members: pinned }] : [];
     if (byProject) {
       const order = [];
@@ -671,17 +726,6 @@ export default class Agents extends View {
             .child(div().text_size(11.5).font_medium().text_color(t.dim).child("Agents"))
             .child(h_flex().gap(10).items_center()
               .child(div()
-                .id("ag-auto-input")
-                .text_size(11)
-                .text_color(autoInputEnabled() ? t.foreground : t.dim)
-                .hover((s) => s.text_color(t.foreground))
-                .tooltip("Blocked Cursor prompts: auto-send Enter or Y+Enter (same screen once)")
-                .on_click((_e, cx) => {
-                  setShared("cursor.auto-input", !autoInputEnabled());
-                  cx.notify();
-                })
-                .child(autoInputEnabled() ? "Auto ↵ on" : "Auto ↵ off"))
-              .child(div()
                 .id("ag-sort")
                 .text_size(11)
                 .text_color(t.dim)
@@ -694,7 +738,7 @@ export default class Agents extends View {
       .when(list.length === 0 && !collapsed, (el) =>
         el.child(div().px(12).text_size(12).text_color(t.dim).child("No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not.")),
       )
-      .child(v_flex().id("ag-list").flex_1().min_h(0).px(collapsed ? 0 : 8).overflow_y_scrollbar().mode("always").children(rows))
+      .child(v_flex().id("ag-list").flex_1().min_h(0).px(collapsed ? 0 : 8).when(!collapsed, (el) => el.gap(4)).overflow_y_scrollbar().mode("always").children(rows))
       .when(collapsed, (el) =>
         el.child(
           h_flex()
