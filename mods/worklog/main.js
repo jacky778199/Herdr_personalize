@@ -1,6 +1,6 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar } from "gpui-base";
-import { theme, run, exec, appHome, props, checking, openOverlay, closeOverlay } from "herdr";
+import { theme, run, exec, appHome, props, checking, openOverlay, closeOverlay, agents, panes, focused } from "herdr";
 
 function todayStr() {
   const d = new Date();
@@ -25,6 +25,7 @@ export default class WorklogPanel extends View {
     const p = props() ?? {};
     this.isDetail = p.mode === "detail";
     this.date = p.date || todayStr();
+    this.sourceMode = p.sourceMode ?? "auto";
     this.selectedConvId = p.convId ?? null;
     this.data = p.initialData ?? null;
     this.loading = false;
@@ -42,6 +43,37 @@ export default class WorklogPanel extends View {
     }
   }
 
+  detectAgentSource() {
+    try {
+      const f = focused?.();
+      const agentList = agents?.() ?? [];
+      const paneList = panes?.() ?? [];
+
+      const matchAgent =
+        (f?.agent && agentList.find((a) => a.address === f.agent)) ||
+        (f?.pane && agentList.find((a) => a.pane === f.pane)) ||
+        (f?.tab && agentList.find((a) => a.tab === f.tab)) ||
+        agentList.find((a) => a.status === "working") ||
+        agentList[0];
+
+      const matchPane =
+        (f?.pane && paneList.find((p) => p.pane === f.pane)) ||
+        (matchAgent?.pane && paneList.find((p) => p.pane === matchAgent.pane)) ||
+        (f?.tab && paneList.find((p) => p.tab === f.tab));
+
+      const appName = (matchAgent?.app ?? "").toLowerCase();
+      const hint = `${appName} ${matchPane?.title ?? ""}`.toLowerCase();
+      if (hint.includes("antigravity") || hint.includes("agy")) return "antigravity";
+      if (hint.includes("cursor")) return "cursor";
+      if (appName === "pi" || /\bpi\b/.test(hint)) return "pi";
+    } catch (_) {}
+    return "all";
+  }
+
+  getEffectiveSource() {
+    return this.sourceMode === "auto" ? this.detectAgentSource() : this.sourceMode;
+  }
+
   loadDate(dateStr, cx) {
     if (this.loading) return;
     this.date = dateStr;
@@ -49,10 +81,12 @@ export default class WorklogPanel extends View {
     this.error = null;
     cx.notify();
 
+    const effectiveSource = this.getEffectiveSource();
+
     cx.spawn(async (cx) => {
       try {
         const script = `${appHome()}/mods/worklog/get_worklog.py`;
-        const res = await exec("python", [script, "--date", dateStr], { timeout: 15000 });
+        const res = await exec("python", [script, "--date", dateStr, "--source", effectiveSource], { timeout: 15000 });
         if (res.code === 0 && res.stdout.trim()) {
           const parsed = JSON.parse(res.stdout.trim());
           if (parsed?.ok) {
@@ -89,6 +123,7 @@ export default class WorklogPanel extends View {
       props: {
         mode: "detail",
         date: this.date,
+        sourceMode: this.sourceMode,
         convId,
         initialData: this.data,
       },
@@ -224,6 +259,52 @@ export default class WorklogPanel extends View {
       );
   }
 
+  renderSourceBar(t, cx) {
+    const detected = this.detectAgentSource();
+    const detectedLabel = detected === "antigravity" ? "Antigravity" : detected === "cursor" ? "Cursor" : detected === "pi" ? "Pi" : "全部";
+    const opts = [
+      { id: "auto", label: `自動 (${detectedLabel})` },
+      { id: "antigravity", label: "Antigravity" },
+      { id: "cursor", label: "Cursor" },
+      { id: "pi", label: "Pi" },
+      { id: "all", label: "全部" },
+    ];
+    return h_flex()
+      .px(10)
+      .py(5)
+      .gap(5)
+      .items_center()
+      .border_b(1)
+      .border_color(t.border)
+      .bg(t.chrome)
+      .child(div().text_size(10).text_color(t.dim).mr(2).child("來源:"))
+      .children(
+        opts.map((o) => {
+          const active = this.sourceMode === o.id;
+          return div()
+            .id(`wl-src-${o.id}`)
+            .px(7)
+            .py(2)
+            .rounded(4)
+            .bg(active ? t.accent + "22" : t.surface)
+            .border(1)
+            .border_color(active ? t.accent + "66" : t.border)
+            .text_size(10)
+            .font_medium()
+            .text_color(active ? t.accent : t.muted)
+            .cursor_pointer()
+            .hover((s) => s.bg(t.hover).text_color(t.foreground))
+            .on_click((_e, cx) => {
+              if (this.sourceMode === o.id) return;
+              this.sourceMode = o.id;
+              this.selectedConvId = null;
+              this.loadDate(this.date, cx);
+            })
+            .child(o.label);
+        })
+      );
+  }
+
   renderKpiStrip(t, summary) {
     return h_flex()
       .px(10)
@@ -352,6 +433,7 @@ export default class WorklogPanel extends View {
           )
       )
       .child(this.renderDateBar(t, summary, cx))
+      .child(this.renderSourceBar(t, cx))
       .child(this.renderKpiStrip(t, summary))
       // Session Filter Pills
       .when(sessions.length > 1, (bar) =>
@@ -743,6 +825,7 @@ export default class WorklogPanel extends View {
           )
       )
       .child(this.renderDateBar(t, summary, cx))
+      .child(this.renderSourceBar(t, cx))
       .child(this.renderKpiStrip(t, summary))
       // Scrollable Concise Session Cards
       .child(
