@@ -4,6 +4,7 @@ import {
   theme,
   run,
   exec,
+  hc,
   appHome,
   props,
   checking,
@@ -84,7 +85,39 @@ async function pollUntil(cx, predicate, maxAttempts = 30, intervalMs = 100) {
   return null;
 }
 
+const TEMPLATE_TO_ROLE = {
+  lead: "lead",
+  investigator: "inv",
+  implementer: "dev",
+  qa: "qa",
+  reporter: "rel",
+};
+
+const ROLE_TO_TEMPLATE = {
+  lead: "lead",
+  inv: "investigator",
+  dev: "implementer",
+  qa: "qa",
+  rel: "reporter",
+};
+
+const ROLE_ORDER = { lead: 0, inv: 1, dev: 2, qa: 3, rel: 4 };
+
+function sanitizeTeamId(raw) {
+  const s = String(raw || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return s || "team-1";
+}
+
 function matchTerminalRole(t) {
+  const labelRole = String(t?.labels?.role || "").toLowerCase();
+  if (ROLE_TO_TEMPLATE[labelRole]) return labelRole;
+
+  const tpl = String(t?.template || "").toLowerCase();
+  if (TEMPLATE_TO_ROLE[tpl]) return TEMPLATE_TO_ROLE[tpl];
+
   const hay = [t?.name, t?.template, t?.agent, t?.title, t?.program?.name]
     .filter(Boolean)
     .join(" ")
@@ -96,6 +129,79 @@ function matchTerminalRole(t) {
   if (/\bdev\b/.test(hay)) return "dev";
   if (/\bqa\b/.test(hay)) return "qa";
   return null;
+}
+
+function resolveTerminalTeam(t, termByAddr) {
+  const visited = new Set();
+  let cur = t;
+  let leadAncestor = null;
+  while (cur && !visited.has(cur.address)) {
+    visited.add(cur.address);
+    if (cur.labels?.team) {
+      return String(cur.labels.team);
+    }
+    if (!leadAncestor && matchTerminalRole(cur) === "lead") {
+      leadAncestor = cur;
+    }
+    cur = cur.parent ? termByAddr.get(cur.parent) : null;
+  }
+  if (leadAncestor) {
+    return leadAncestor.name || leadAncestor.address;
+  }
+  if (matchTerminalRole(t) !== null) {
+    return "default-team";
+  }
+  return null;
+}
+
+function groupWorkspaceTeams(wsTerms, selectedIssueId) {
+  const termByAddr = new Map(wsTerms.map((t) => [t.address, t]));
+  const groups = new Map();
+
+  for (const t of wsTerms) {
+    const teamKey = resolveTerminalTeam(t, termByAddr);
+    if (!teamKey) continue;
+    if (!groups.has(teamKey)) {
+      groups.set(teamKey, []);
+    }
+    groups.get(teamKey).push(t);
+  }
+
+  // If there's an unlabelled "default-team" and exactly one other named team, merge orphans into it
+  if (groups.has("default-team") && groups.size === 2) {
+    const otherKey = [...groups.keys()].find((k) => k !== "default-team");
+    const orphans = groups.get("default-team");
+    groups.get(otherKey).push(...orphans);
+    groups.delete("default-team");
+  }
+
+  const currentTeamId = selectedIssueId ? sanitizeTeamId(`issue-${selectedIssueId}`) : null;
+
+  const teams = [...groups.entries()].map(([id, members]) => {
+    members.sort((a, b) => {
+      const ra = ROLE_ORDER[matchTerminalRole(a)] ?? 99;
+      const rb = ROLE_ORDER[matchTerminalRole(b)] ?? 99;
+      if (ra !== rb) return ra - rb;
+      return String(a.name || a.address).localeCompare(String(b.name || b.address));
+    });
+    const isCurrent = Boolean(
+      (currentTeamId && id === currentTeamId) ||
+        (!currentTeamId && groups.size === 1)
+    );
+    return {
+      id,
+      label: id === "default-team" ? "Default Team" : id,
+      members,
+      isCurrent,
+    };
+  });
+
+  teams.sort((a, b) => {
+    if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
+    return a.id.localeCompare(b.id);
+  });
+
+  return teams;
 }
 
 async function execParser(script, extraArgs) {
@@ -240,6 +346,7 @@ export default class IssuePanel extends View {
     this.threePanes = null;
     this.buildingLayout = false;
     this.layoutStatus = "";
+    this.collapsedTeams = new Set();
 
     if (this.isDetail) {
       this.handle = cx.focus_handle();
@@ -573,43 +680,228 @@ export default class IssuePanel extends View {
     return null;
   }
 
-  connectThreePanes(cx) {
-    const tp = this.activeThreePanes();
-    if (!tp) return;
+  currentTeamId(wsTerms) {
+    if (this.selectedIssueId) {
+      return sanitizeTeamId(`issue-${this.selectedIssueId}`);
+    }
+    const teams = groupWorkspaceTeams(wsTerms ?? this.workspaceTerminals(), null);
+    if (teams.length > 0) return teams[0].id;
+    return "team-1";
+  }
+
+  currentTeamMembers(wsTerms) {
+    const list = wsTerms ?? this.workspaceTerminals();
+    const teams = groupWorkspaceTeams(list, this.selectedIssueId);
+    const targetId = this.currentTeamId(list);
+    const exact = teams.find((tm) => tm.id === targetId);
+    if (exact) return exact.members;
+    // If no issue-specific team exists yet and there's a single unlabelled legacy team, reuse it
+    if (teams.length === 1 && !teams[0].id.startsWith("issue-")) {
+      return teams[0].members;
+    }
+    return [];
+  }
+
+  uniqueTerminalName(baseName) {
+    const clean = sanitizeTeamId(baseName).slice(0, 28);
+    const liveNames = new Set(
+      (terminals?.() ?? [])
+        .filter((t) => t.state === "live" && t.name)
+        .map((t) => String(t.name).toLowerCase())
+    );
+    if (!liveNames.has(clean)) return clean;
+    for (let i = 2; i < 100; i++) {
+      const candidate = `${clean.slice(0, 32 - String(i).length - 1)}-${i}`;
+      if (!liveNames.has(candidate)) return candidate;
+    }
+    return `${clean.slice(0, 24)}-${Date.now().toString(36).slice(-6)}`;
+  }
+
+  async spawnTeamAgent(cx, { role, teamId, cwd, parentAddr }) {
+    const template = ROLE_TO_TEMPLATE[role];
+    if (!template || !cwd) return null;
+    const name = this.uniqueTerminalName(`${teamId}-${role}`);
+    const args = [
+      "run",
+      "--bg",
+      "--json",
+      "--cwd",
+      cwd,
+      "--name",
+      name,
+      "--label",
+      `team=${teamId}`,
+      "--label",
+      `role=${role}`,
+    ];
+    if (parentAddr) {
+      args.push("--parent", parentAddr, "--outlive-parent");
+    } else {
+      args.push("--no-parent");
+    }
+    args.push(template);
+
+    const res = await hc(args);
+    if (res.code !== 0) {
+      throw new Error(res.stderr?.trim() || res.stdout?.trim() || `hc run ${template} 失敗 (${res.code})`);
+    }
+    let addr = null;
+    try {
+      const parsed = JSON.parse(res.stdout?.trim() || "{}");
+      addr = parsed?.address || parsed?.terminal?.address || parsed?.id || null;
+    } catch {
+      // ignore JSON parse error; fall back to name lookup
+    }
+
+    const found = await pollUntil(
+      cx,
+      () => {
+        const list = (terminals?.() ?? []).filter((t) => t.state === "live");
+        return list.find((t) => (addr && t.address === addr) || t.name === name) || null;
+      },
+      30,
+      100
+    );
+    return found || (addr ? { address: addr, name } : null);
+  }
+
+  async ensureTeamAndConnect(cx, tp) {
+    if (!tp || !this.cwd) return;
+    const targetCwd = this.cwd;
     const wsTerms = this.workspaceTerminals();
-    const leadTerm = this.findRoleTerminal(["lead"], wsTerms);
-    const rtTerm = this.findRoleTerminal(["inv", "rel"], wsTerms);
-    const rbTerm = this.findRoleTerminal(["dev", "qa"], wsTerms);
+    const teamId = this.currentTeamId(wsTerms);
+    let teamMembers = this.currentTeamMembers(wsTerms);
+
+    let leadTerm = this.findRoleTerminal(["lead"], teamMembers);
+    let rtTerm = this.findRoleTerminal(["inv", "rel"], teamMembers);
+    let rbTerm = this.findRoleTerminal(["dev", "qa"], teamMembers);
+
+    let createdCount = 0;
+
+    if (!leadTerm) {
+      this.layoutStatus = `正在建立 Team ${teamId} · 啟動 lead…`;
+      cx?.notify?.();
+      leadTerm = await this.spawnTeamAgent(cx, {
+        role: "lead",
+        teamId,
+        cwd: targetCwd,
+        parentAddr: null,
+      });
+      if (leadTerm) createdCount += 1;
+    }
+
+    const parentAddr = leadTerm?.address || null;
+    const pending = [];
+    if (!rtTerm) {
+      pending.push(
+        this.spawnTeamAgent(cx, {
+          role: "inv",
+          teamId,
+          cwd: targetCwd,
+          parentAddr,
+        }).then((t) => {
+          if (t) {
+            rtTerm = t;
+            createdCount += 1;
+          }
+        })
+      );
+    }
+    if (!rbTerm) {
+      pending.push(
+        this.spawnTeamAgent(cx, {
+          role: "dev",
+          teamId,
+          cwd: targetCwd,
+          parentAddr,
+        }).then((t) => {
+          if (t) {
+            rbTerm = t;
+            createdCount += 1;
+          }
+        })
+      );
+    }
+
+    if (pending.length > 0) {
+      this.layoutStatus = `正在建立 Team ${teamId} · 啟動 inv / dev…`;
+      cx?.notify?.();
+      await Promise.all(pending);
+    }
 
     let connected = 0;
-    if (leadTerm) {
+    if (leadTerm?.address) {
       run("terminal.show", { terminal: leadTerm.address, pane: tp.left });
       connected += 1;
     }
-    if (rtTerm) {
+    if (rtTerm?.address) {
       run("terminal.show", { terminal: rtTerm.address, pane: tp.rightTop });
       connected += 1;
     }
-    if (rbTerm) {
+    if (rbTerm?.address) {
       run("terminal.show", { terminal: rbTerm.address, pane: tp.rightBottom });
       connected += 1;
     }
-    this.layoutStatus = connected > 0 ? `已連接 ${connected} 個 AI Agent` : "3 格就緒（尚無對應 Agent）";
+    if (tp.left) {
+      run("pane.focus", { pane: tp.left });
+    }
+
+    this.layoutStatus =
+      createdCount > 0
+        ? `已建立 Team ${teamId} 並連接 ${connected} 個 AI Agent`
+        : connected > 0
+          ? `已連接 Team ${teamId} (${connected} 個 AI Agent)`
+          : "3 格就緒（無法啟動 Agent）";
     cx?.notify?.();
   }
 
+  connectThreePanes(cx) {
+    const tp = this.activeThreePanes();
+    if (!tp) return;
+    cx.spawn(async (cx) => {
+      try {
+        await this.ensureTeamAndConnect(cx, tp);
+      } catch (err) {
+        this.layoutStatus = `連接 Team 失敗: ${String(err)}`;
+        cx?.notify?.();
+      }
+    });
+  }
+
   openOrConnectSlot(paneId, roleCandidates, cx) {
-    if (!paneId) return;
+    if (!paneId || !this.cwd) return;
     const wsTerms = this.workspaceTerminals();
-    const hit = this.findRoleTerminal(roleCandidates, wsTerms);
+    const teamId = this.currentTeamId(wsTerms);
+    const teamMembers = this.currentTeamMembers(wsTerms);
+    const hit = this.findRoleTerminal(roleCandidates, teamMembers);
     if (hit) {
       run("terminal.show", { terminal: hit.address, pane: paneId });
       this.layoutStatus = `已連接 ${hit.name || hit.template || roleCandidates[0]}`;
-    } else if (this.cwd) {
-      run("terminal.open", { folder: this.cwd, pane: paneId });
-      this.layoutStatus = `已於格位開啟終端機 (${roleCandidates[0]})`;
+      cx?.notify?.();
+      return;
     }
+    const role = roleCandidates[0];
+    const leadTerm = this.findRoleTerminal(["lead"], teamMembers);
+    this.layoutStatus = `正在啟動 ${role}…`;
     cx?.notify?.();
+    cx.spawn(async (cx) => {
+      try {
+        const spawned = await this.spawnTeamAgent(cx, {
+          role,
+          teamId,
+          cwd: this.cwd,
+          parentAddr: role === "lead" ? null : leadTerm?.address || null,
+        });
+        if (spawned?.address) {
+          run("terminal.show", { terminal: spawned.address, pane: paneId });
+          this.layoutStatus = `已啟動並連接 ${spawned.name || role}`;
+        }
+      } catch (err) {
+        this.layoutStatus = `啟動 ${role} 失敗: ${String(err)}`;
+      } finally {
+        cx?.notify?.();
+      }
+    });
   }
 
   buildThreePanes(cx) {
@@ -694,7 +986,7 @@ export default class IssuePanel extends View {
           rightTop: rightTopPaneId,
           rightBottom: rightBottomPane.pane,
         };
-        this.connectThreePanes(cx);
+        await this.ensureTeamAndConnect(cx, this.threePanes);
       } catch (err) {
         this.layoutStatus = `建置失敗: ${String(err)}`;
       } finally {
@@ -994,12 +1286,15 @@ export default class IssuePanel extends View {
     const paneById = new Map(paneList.map((p) => [p.pane, p]));
     const termByAddr = new Map(wsTerms.map((term) => [term.address, term]));
     const tp = this.activeThreePanes();
-    const hiddenTerms = wsTerms.filter((term) => !term.pane || !paneById.has(term.pane));
+    const teams = groupWorkspaceTeams(wsTerms, this.selectedIssueId);
+    const crewTerms = teams.flatMap((tm) => tm.members);
+    const hiddenCrewCount = crewTerms.filter((term) => !term.pane || !paneById.has(term.pane)).length;
+    const currentTeamMembers = this.currentTeamMembers(wsTerms);
 
     const slotInfo = (paneId, label, roles) => {
       const p = paneId ? paneById.get(paneId) : null;
       const boundTerm = p?.terminal ? termByAddr.get(p.terminal) : null;
-      const candidate = this.findRoleTerminal(roles, wsTerms);
+      const candidate = this.findRoleTerminal(roles, currentTeamMembers);
       return { paneId, label, roles, boundTerm, candidate };
     };
     const threeSlots = tp
@@ -1330,7 +1625,7 @@ export default class IssuePanel extends View {
                     )
                 )
               )
-              // Sub-Terminals & Live Terminals (including hidden hc sub-terminals)
+              // Team Crew (only team agents, grouped by team and collapsible)
               .when(Boolean(this.cwd), (el) =>
                 el.child(
                   v_flex()
@@ -1344,150 +1639,211 @@ export default class IssuePanel extends View {
                       h_flex()
                         .justify_between()
                         .items_center()
-                        .child(div().font_semibold().text_size(11.5).child("Terminals / hc Sub-Terminals"))
+                        .child(div().font_semibold().text_size(11.5).child("Team Crew"))
                         .child(
                           div()
                             .text_size(10)
-                            .text_color(hiddenTerms.length > 0 ? t.accent : t.dim)
-                            .child(`${wsTerms.length} 執行中${hiddenTerms.length > 0 ? ` (${hiddenTerms.length} 背景)` : ""}`)
+                            .text_color(hiddenCrewCount > 0 ? t.accent : t.dim)
+                            .child(`${crewTerms.length} 執行中${hiddenCrewCount > 0 ? ` (${hiddenCrewCount} 背景)` : ""}`)
                         )
                     )
-                    .when(wsTerms.length === 0, (s) =>
-                      s.child(div().text_size(10.5).text_color(t.dim).child("目前工作區無執行中的 Terminal"))
+                    .when(teams.length === 0, (s) =>
+                      s.child(div().text_size(10.5).text_color(t.dim).child("目前工作區無執行中的 Team Crew"))
                     )
                     .children(
-                      wsTerms.map((term, idx) => {
-                        const hasPane = Boolean(term.pane && paneById.has(term.pane));
-                        const role = matchTerminalRole(term);
-                        const label = term.name || term.template || term.title || term.program?.name || term.address;
-                        const targetPane = this.targetPaneForRole(role);
+                      teams.map((team, tIdx) => {
+                        const isCollapsed = this.collapsedTeams.has(team.id);
+                        const teamHidden = team.members.filter((m) => !m.pane || !paneById.has(m.pane)).length;
                         return v_flex()
-                          .id(`ws-term-${idx}`)
-                          .px(7)
-                          .py(5)
-                          .gap(4)
-                          .rounded(5)
-                          .bg(t.chrome)
-                          .border(1)
-                          .border_color(!hasPane ? t.accent + "44" : t.border)
+                          .id(`team-group-${tIdx}`)
+                          .gap(5)
                           .child(
                             h_flex()
+                              .id(`team-hdr-${tIdx}`)
+                              .px(7)
+                              .py(4)
+                              .rounded(5)
+                              .bg(t.chrome)
+                              .border(1)
+                              .border_color(team.isCurrent ? t.accent + "44" : t.border)
                               .justify_between()
                               .items_center()
-                              .gap(6)
+                              .cursor_pointer()
+                              .hover((h) => h.bg(t.hover))
+                              .on_click((_e, cx) => {
+                                if (this.collapsedTeams.has(team.id)) {
+                                  this.collapsedTeams.delete(team.id);
+                                } else {
+                                  this.collapsedTeams.add(team.id);
+                                }
+                                cx.notify();
+                              })
                               .child(
                                 h_flex()
                                   .gap(5)
                                   .items_center()
-                                  .flex_1()
                                   .min_w(0)
-                                  .child(div().size(6).rounded(3).flex_none().bg(agentDotColor(term.status, t)))
-                                  .child(div().text_size(10.5).font_medium().truncate().text_color(t.foreground).child(label))
-                                  .when(Boolean(role), (r) =>
-                                    r.child(
+                                  .flex_1()
+                                  .child(div().text_size(10).text_color(t.muted).child(isCollapsed ? "▸" : "▾"))
+                                  .child(div().text_size(10.5).font_semibold().truncate().text_color(t.foreground).child(team.label))
+                                  .when(team.isCurrent, (b) =>
+                                    b.child(
                                       div()
                                         .px(4)
                                         .py(1)
                                         .rounded(3)
-                                        .bg(t.surface)
-                                        .border(1)
-                                        .border_color(t.border)
+                                        .bg(t.accent + "22")
                                         .text_size(9)
-                                        .text_color(t.muted)
-                                        .child(role)
+                                        .text_color(t.accent)
+                                        .child("目前")
                                     )
                                   )
                               )
                               .child(
                                 div()
                                   .flex_none()
-                                  .px(5)
-                                  .py(1)
-                                  .rounded(3)
-                                  .bg(hasPane ? t.surface : t.accent + "22")
-                                  .text_size(9)
-                                  .text_color(hasPane ? t.dim : t.accent)
-                                  .child(hasPane ? (term.status || "pane") : "背景 hc")
+                                  .text_size(9.5)
+                                  .text_color(teamHidden > 0 ? t.accent : t.dim)
+                                  .child(`${team.members.length} 人${teamHidden > 0 ? ` · ${teamHidden} 背景` : ""}`)
                               )
                           )
-                          .child(
-                            h_flex()
-                              .gap(4)
-                              .flex_wrap()
-                              .when(hasPane, (b) =>
-                                b.child(
-                                  div()
-                                    .id(`term-focus-${idx}`)
-                                    .px(6)
-                                    .py(2)
-                                    .rounded(4)
-                                    .bg(t.surface)
-                                    .border(1)
-                                    .border_color(t.border)
-                                    .text_size(9.5)
-                                    .text_color(t.foreground)
-                                    .cursor_pointer()
-                                    .hover((h) => h.bg(t.hover))
-                                    .on_click(() => {
-                                      if (term.pane) run("pane.focus", { pane: term.pane });
-                                      else run("agent.focus", { terminal: term.address });
-                                    })
-                                    .child("Focus")
-                                )
-                              )
-                              .when(!hasPane, (b) =>
-                                b
+                          .when(!isCollapsed, (listEl) =>
+                            listEl.children(
+                              team.members.map((term, idx) => {
+                                const hasPane = Boolean(term.pane && paneById.has(term.pane));
+                                const role = matchTerminalRole(term);
+                                const label = term.name || term.template || term.title || term.program?.name || term.address;
+                                const targetPane = this.targetPaneForRole(role);
+                                return v_flex()
+                                  .id(`ws-term-${tIdx}-${idx}`)
+                                  .px(7)
+                                  .py(5)
+                                  .gap(4)
+                                  .rounded(5)
+                                  .bg(t.chrome)
+                                  .border(1)
+                                  .border_color(!hasPane ? t.accent + "44" : t.border)
                                   .child(
-                                    div()
-                                      .id(`term-peek-${idx}`)
-                                      .px(6)
-                                      .py(2)
-                                      .rounded(4)
-                                      .bg(t.surface)
-                                      .border(1)
-                                      .border_color(t.border)
-                                      .text_size(9.5)
-                                      .text_color(t.foreground)
-                                      .cursor_pointer()
-                                      .hover((h) => h.bg(t.hover))
-                                      .on_click(() => run("terminal.peek", { terminal: term.address }))
-                                      .child("Peek")
+                                    h_flex()
+                                      .justify_between()
+                                      .items_center()
+                                      .gap(6)
+                                      .child(
+                                        h_flex()
+                                          .gap(5)
+                                          .items_center()
+                                          .flex_1()
+                                          .min_w(0)
+                                          .child(div().size(6).rounded(3).flex_none().bg(agentDotColor(term.status, t)))
+                                          .child(div().text_size(10.5).font_medium().truncate().text_color(t.foreground).child(label))
+                                          .when(Boolean(role), (r) =>
+                                            r.child(
+                                              div()
+                                                .px(4)
+                                                .py(1)
+                                                .rounded(3)
+                                                .bg(t.surface)
+                                                .border(1)
+                                                .border_color(t.border)
+                                                .text_size(9)
+                                                .text_color(t.muted)
+                                                .child(role)
+                                            )
+                                          )
+                                      )
+                                      .child(
+                                        div()
+                                          .flex_none()
+                                          .px(5)
+                                          .py(1)
+                                          .rounded(3)
+                                          .bg(hasPane ? t.surface : t.accent + "22")
+                                          .text_size(9)
+                                          .text_color(hasPane ? t.dim : t.accent)
+                                          .child(hasPane ? (term.status || "pane") : "背景 hc")
+                                      )
                                   )
                                   .child(
-                                    div()
-                                      .id(`term-tab-${idx}`)
-                                      .px(6)
-                                      .py(2)
-                                      .rounded(4)
-                                      .bg(t.surface)
-                                      .border(1)
-                                      .border_color(t.border)
-                                      .text_size(9.5)
-                                      .text_color(t.foreground)
-                                      .cursor_pointer()
-                                      .hover((h) => h.bg(t.hover))
-                                      .on_click(() => run("terminal.keep", { terminal: term.address, place: "tab" }))
-                                      .child("Tab")
-                                  )
-                                  .when(Boolean(targetPane), (pBtn) =>
-                                    pBtn.child(
-                                      div()
-                                        .id(`term-pane-${idx}`)
-                                        .px(6)
-                                        .py(2)
-                                        .rounded(4)
-                                        .bg(t.accent + "22")
-                                        .border(1)
-                                        .border_color(t.accent + "55")
-                                        .text_size(9.5)
-                                        .text_color(t.accent)
-                                        .cursor_pointer()
-                                        .hover((h) => h.bg(t.accent + "33"))
-                                        .on_click(() => run("terminal.show", { terminal: term.address, pane: targetPane }))
-                                        .child("Pane")
-                                    )
-                                  )
-                              )
+                                    h_flex()
+                                      .gap(4)
+                                      .flex_wrap()
+                                      .when(hasPane, (b) =>
+                                        b.child(
+                                          div()
+                                            .id(`term-focus-${tIdx}-${idx}`)
+                                            .px(6)
+                                            .py(2)
+                                            .rounded(4)
+                                            .bg(t.surface)
+                                            .border(1)
+                                            .border_color(t.border)
+                                            .text_size(9.5)
+                                            .text_color(t.foreground)
+                                            .cursor_pointer()
+                                            .hover((h) => h.bg(t.hover))
+                                            .on_click(() => {
+                                              if (term.pane) run("pane.focus", { pane: term.pane });
+                                              else run("agent.focus", { terminal: term.address });
+                                            })
+                                            .child("Focus")
+                                        )
+                                      )
+                                      .when(!hasPane, (b) =>
+                                        b
+                                          .child(
+                                            div()
+                                              .id(`term-peek-${tIdx}-${idx}`)
+                                              .px(6)
+                                              .py(2)
+                                              .rounded(4)
+                                              .bg(t.surface)
+                                              .border(1)
+                                              .border_color(t.border)
+                                              .text_size(9.5)
+                                              .text_color(t.foreground)
+                                              .cursor_pointer()
+                                              .hover((h) => h.bg(t.hover))
+                                              .on_click(() => run("terminal.peek", { terminal: term.address }))
+                                              .child("Peek")
+                                          )
+                                          .child(
+                                            div()
+                                              .id(`term-tab-${tIdx}-${idx}`)
+                                              .px(6)
+                                              .py(2)
+                                              .rounded(4)
+                                              .bg(t.surface)
+                                              .border(1)
+                                              .border_color(t.border)
+                                              .text_size(9.5)
+                                              .text_color(t.foreground)
+                                              .cursor_pointer()
+                                              .hover((h) => h.bg(t.hover))
+                                              .on_click(() => run("terminal.keep", { terminal: term.address, place: "tab" }))
+                                              .child("Tab")
+                                          )
+                                          .when(Boolean(targetPane), (pBtn) =>
+                                            pBtn.child(
+                                              div()
+                                                .id(`term-pane-${tIdx}-${idx}`)
+                                                .px(6)
+                                                .py(2)
+                                                .rounded(4)
+                                                .bg(t.accent + "22")
+                                                .border(1)
+                                                .border_color(t.accent + "55")
+                                                .text_size(9.5)
+                                                .text_color(t.accent)
+                                                .cursor_pointer()
+                                                .hover((h) => h.bg(t.accent + "33"))
+                                                .on_click(() => run("terminal.show", { terminal: term.address, pane: targetPane }))
+                                                .child("Pane")
+                                            )
+                                          )
+                                      )
+                                  );
+                              })
+                            )
                           );
                       })
                     )
