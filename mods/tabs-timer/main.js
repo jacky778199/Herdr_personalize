@@ -98,7 +98,7 @@ export default class Tabs extends View {
     this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}");
     this.shown = [];
     this.tabIds = [];
-    this.enabled = ["files", "changes", "git", "usage", "worklog", "note"];
+    this.enabled = ["files", "changes", "git", "usage", "worklog", "note", "issue"];
     this.panelHidden = null;
     this.bodyActive = null;
     this.maximized = null;
@@ -113,7 +113,7 @@ export default class Tabs extends View {
   capture(cx, force) {
     if (!force && !window().active) return;
     const w = tabWorld();
-    const enabled = [...new Set([...(w.panels ?? ["files", "changes"]), "git", "usage", "worklog", "note"])];
+    const enabled = [...new Set([...(w.panels ?? ["files", "changes"]), "git", "usage", "worklog", "note", "issue"])];
     this.syncPanel(w.space, w.panel, w.body, enabled);
     const shown = (w.space?.tabs ?? []).map((c) => {
       const program = w.programByTab.get(c.id) ?? null;
@@ -260,6 +260,7 @@ export default class Tabs extends View {
       .when(enabled.includes("usage"), el => el.child(panelButton("usage", "Usage", "mods/cursor-usage/icons/coins.svg")))
       .when(enabled.includes("worklog"), el => el.child(panelButton("worklog", "Worklog", "mods/task-notes/book.svg")))
       .when(enabled.includes("note"), el => el.child(panelButton("note", "Note", "mods/note/note.svg")))
+      .when(enabled.includes("issue"), el => el.child(panelButton("issue", "Issue", "mods/issue-panel/icons/issue.svg")))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs-timer/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs-timer/${maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", (_e, cx) => { this.actedAt = Date.now(); this.maximized = !maximized; cx.notify(); run("window.maximize"); }))
         .child(button("close-window", w.platform === "windows" ? svg("mods/tabs-timer/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));

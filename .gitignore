@@ -19,6 +19,8 @@ mods/cursor-usage/usage_cache.json
 mods/cursor-usage/model_fees_cache.json
 !mods/git-graph/
 !mods/git-graph/**
+!mods/issue-panel/
+!mods/issue-panel/**
 !mods/agents-edited/
 !mods/agents-edited/**
 !mods/agents-live/

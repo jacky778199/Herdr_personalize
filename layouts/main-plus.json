@@ -169,6 +169,13 @@
                       "content": {
                         "mod": "note"
                       }
+                    },
+                    {
+                      "id": "issue",
+                      "type": "block",
+                      "content": {
+                        "mod": "issue-panel"
+                      }
                     }
                   ],
                   "active": "files"
