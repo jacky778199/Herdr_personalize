@@ -80,26 +80,33 @@ function Find-HerdrExe {
 Write-Host "==> Installing Herdr Personalize mods to: $HerdrHome" -ForegroundColor Cyan
 
 try {
-  New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
   $SourceDir = $null
+  $LocalMods = if ($PSScriptRoot) { Join-Path $PSScriptRoot "mods" } else { $null }
+  $LocalLayout = if ($PSScriptRoot) { Join-Path $PSScriptRoot "layouts\main-plus.json" } else { $null }
 
-  if (Get-Command git -ErrorAction SilentlyContinue) {
-    Write-Host "    Cloning $RepoUrl ..."
-    git clone --depth 1 $RepoUrl "$TmpDir\repo" | Out-Null
-    $SourceDir = "$TmpDir\repo"
+  if ($PSScriptRoot -and (Test-Path $LocalMods) -and (Test-Path $LocalLayout)) {
+    Write-Host "    Using local repository: $PSScriptRoot" -ForegroundColor DarkGray
+    $SourceDir = $PSScriptRoot
   } else {
-    Write-Host "    Downloading $ZipUrl ..."
-    $ZipPath = Join-Path $TmpDir "repo.zip"
-    Invoke-WebRequest -Uri $ZipUrl -OutFile $ZipPath -UseBasicParsing
-    Expand-Archive -Path $ZipPath -DestinationPath $TmpDir -Force
-    $SourceDir = Join-Path $TmpDir "Herdr_personalize-main"
+    New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+      Write-Host "    Cloning $RepoUrl ..."
+      git clone --depth 1 $RepoUrl "$TmpDir\repo" | Out-Null
+      $SourceDir = "$TmpDir\repo"
+    } else {
+      Write-Host "    Downloading $ZipUrl ..."
+      $ZipPath = Join-Path $TmpDir "repo.zip"
+      Invoke-WebRequest -Uri $ZipUrl -OutFile $ZipPath -UseBasicParsing
+      Expand-Archive -Path $ZipPath -DestinationPath $TmpDir -Force
+      $SourceDir = Join-Path $TmpDir "Herdr_personalize-main"
+    }
   }
 
   if (-not (Test-Path $HerdrHome)) {
     New-Item -ItemType Directory -Force -Path $HerdrHome | Out-Null
   }
 
-  # 1. Install layout
+  # 1. Install layout and clear stale layout state cache
   $LayoutsSrc = Join-Path $SourceDir "layouts"
   $LayoutsDst = Join-Path $HerdrHome "layouts"
   if (Test-Path $LayoutsSrc) {
@@ -108,13 +115,19 @@ try {
     $StaleState = Join-Path $LayoutsDst ".state\main-plus.json"
     if (Test-Path $StaleState) {
       Remove-Item -Path $StaleState -Force -ErrorAction SilentlyContinue
+      Write-Host "    [-] Removed stale layout state: .state\main-plus.json" -ForegroundColor Yellow
     }
     Write-Host "    [+] Installed layouts (main-plus.json)" -ForegroundColor Green
   }
 
-  # 2. Install custom mods
+  # 2. Clean legacy ai-team prototype and install custom mods
   $ModsSrc = Join-Path $SourceDir "mods"
   $ModsDst = Join-Path $HerdrHome "mods"
+  $LegacyAiTeam = Join-Path $ModsDst "ai-team"
+  if (Test-Path $LegacyAiTeam) {
+    Remove-Item -Path $LegacyAiTeam -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "    [-] Removed legacy mod: ai-team" -ForegroundColor Yellow
+  }
   if (Test-Path $ModsSrc) {
     New-Item -ItemType Directory -Force -Path $ModsDst | Out-Null
     Get-ChildItem -Path $ModsSrc -Directory | ForEach-Object {

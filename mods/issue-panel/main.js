@@ -10,6 +10,7 @@ import {
   openOverlay,
   closeOverlay,
   agents,
+  terminals,
   panes,
   spaces,
   focused,
@@ -63,11 +64,64 @@ function detectWorkspace() {
     const f = focused?.() ?? null;
     const paneList = panes?.() ?? [];
     const pane = f?.pane ? paneList.find((p) => p.pane === f.pane) : null;
-    const cwd = pane?.cwd || f?.cwd || space?.folder || "";
+    const cwd = pane?.cwd || f?.cwd || space?.folder || paneList[0]?.cwd || "";
     return { cwd, space };
   } catch {
     return { cwd: "", space: null };
   }
+}
+
+function waitMs(cx, ms) {
+  return new Promise((resolve) => cx.timer.after(ms, () => resolve()));
+}
+
+async function pollUntil(cx, predicate, maxAttempts = 30, intervalMs = 100) {
+  for (let i = 0; i < maxAttempts; i++) {
+    const val = predicate();
+    if (val) return val;
+    await waitMs(cx, intervalMs);
+  }
+  return null;
+}
+
+function matchTerminalRole(t) {
+  const hay = [t?.name, t?.template, t?.agent, t?.title, t?.program?.name]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  if (!hay) return null;
+  if (/\blead\b/.test(hay)) return "lead";
+  if (/\binv\b/.test(hay)) return "inv";
+  if (/\brel\b/.test(hay)) return "rel";
+  if (/\bdev\b/.test(hay)) return "dev";
+  if (/\bqa\b/.test(hay)) return "qa";
+  return null;
+}
+
+async function execParser(script, extraArgs) {
+  const candidates = [
+    { bin: "python", args: [script, ...extraArgs] },
+    { bin: "py", args: ["-3", script, ...extraArgs] },
+    { bin: "python3", args: [script, ...extraArgs] },
+  ];
+  const errors = [];
+  for (const c of candidates) {
+    try {
+      const res = await exec(c.bin, c.args, { timeout: 10000 });
+      if (res.code === 0 && res.stdout?.trim()) {
+        return { ok: true, res };
+      }
+      const detail = res.stderr?.trim() || res.stdout?.trim() || `exit ${res.code}`;
+      errors.push(`${c.bin}: ${detail}`);
+      // If script itself returned JSON error (e.g. path traversal), don't retry other pythons
+      if (res.stdout?.trim().startsWith("{")) {
+        return { ok: false, res, error: detail };
+      }
+    } catch (err) {
+      errors.push(`${c.bin}: ${String(err)}`);
+    }
+  }
+  return { ok: false, res: null, error: errors.join(" | ") || "無法執行 python parser.py" };
 }
 
 function parseMarkdownBlocks(text) {
@@ -177,12 +231,15 @@ export default class IssuePanel extends View {
     this.docError = null;
     this.copiedKind = null;
 
-    // Watcher state
+    // Watcher & 3-pane layout state
     this._watchingDir = null;
     this._watchGen = 0;
     this._watcher = null;
     this._debouncePending = false;
     this._agentSig = "";
+    this.threePanes = null;
+    this.buildingLayout = false;
+    this.layoutStatus = "";
 
     if (this.isDetail) {
       this.handle = cx.focus_handle();
@@ -219,8 +276,14 @@ export default class IssuePanel extends View {
 
   computeAgentSig() {
     try {
-      const list = agents?.() ?? [];
-      return list.map((a) => `${a.address}:${a.status}:${a.pane ?? ""}`).join("|");
+      const aList = agents?.() ?? [];
+      const tList = terminals?.() ?? [];
+      const aSig = aList.map((a) => `${a.address}:${a.status}:${a.pane ?? ""}`).join("|");
+      const tSig = tList
+        .filter((t) => t.state === "live")
+        .map((t) => `${t.address}:${t.pane ?? ""}:${t.status ?? ""}:${t.name ?? ""}`)
+        .join("|");
+      return `${aSig}#${tSig}`;
     } catch {
       return "";
     }
@@ -297,13 +360,13 @@ export default class IssuePanel extends View {
     cx.spawn(async (cx) => {
       try {
         const script = `${appHome()}/mods/issue-panel/parser.py`;
-        const args = [script, "--cwd", targetCwd];
+        const args = ["--cwd", targetCwd];
         if (targetIssue) {
           args.push("--issue", targetIssue);
         }
-        const res = await exec("python", args, { timeout: 10000 });
-        if (res.code === 0 && res.stdout.trim()) {
-          const parsed = JSON.parse(res.stdout.trim());
+        const execOut = await execParser(script, args);
+        if (execOut.ok && execOut.res) {
+          const parsed = JSON.parse(execOut.res.stdout.trim());
           if (parsed?.ok) {
             this.data = parsed;
             if (parsed.selected_issue_id) {
@@ -317,7 +380,7 @@ export default class IssuePanel extends View {
             this.error = parsed?.error || "解析 Issue 狀態失敗";
           }
         } else {
-          this.error = res.stderr?.trim() || "執行 parser.py 失敗";
+          this.error = execOut.error || "執行 parser.py 失敗";
         }
       } catch (err) {
         this.error = String(err);
@@ -341,13 +404,16 @@ export default class IssuePanel extends View {
     cx.spawn(async (cx) => {
       try {
         const script = `${appHome()}/mods/issue-panel/parser.py`;
-        const res = await exec(
-          "python",
-          [script, "--cwd", targetCwd, "--issue", targetIssue, "--doc", docName],
-          { timeout: 10000 }
-        );
-        if (res.code === 0 && res.stdout.trim()) {
-          const parsed = JSON.parse(res.stdout.trim());
+        const execOut = await execParser(script, [
+          "--cwd",
+          targetCwd,
+          "--issue",
+          targetIssue,
+          "--doc",
+          docName,
+        ]);
+        if (execOut.ok && execOut.res) {
+          const parsed = JSON.parse(execOut.res.stdout.trim());
           if (parsed?.ok) {
             this.docContent = parsed.content ?? "";
             this.docPath = parsed.path ?? "";
@@ -358,10 +424,13 @@ export default class IssuePanel extends View {
             this.docError = parsed?.error || "無法讀取文件";
           }
         } else {
-          let errMsg = res.stderr?.trim() || "讀取文件失敗";
+          let errMsg = execOut.error || "讀取文件失敗";
           try {
-            const errJson = JSON.parse(res.stdout.trim());
-            if (errJson?.error) errMsg = errJson.error;
+            const rawOut = execOut.res?.stdout?.trim();
+            if (rawOut) {
+              const errJson = JSON.parse(rawOut);
+              if (errJson?.error) errMsg = errJson.error;
+            }
           } catch {
             // ignore
           }
@@ -429,6 +498,210 @@ export default class IssuePanel extends View {
     } catch {
       return [];
     }
+  }
+
+  workspaceTerminals() {
+    try {
+      const allLive = (terminals?.() ?? []).filter((t) => t.state === "live");
+      const paneList = panes?.() ?? [];
+      const paneById = new Map(paneList.map((p) => [p.pane, p]));
+      const agentAddrs = new Set(this.workspaceAgents().map((a) => a.address));
+      const curNorm = normPath(this.cwd);
+
+      const matchesCwd = (c) => {
+        const n = normPath(c);
+        if (!curNorm || !n) return false;
+        return n === curNorm || n.startsWith(`${curNorm}/`) || curNorm.startsWith(`${n}/`);
+      };
+
+      const included = new Set();
+      for (const t of allLive) {
+        const p = t.pane ? paneById.get(t.pane) : null;
+        if (matchesCwd(t.cwd) || matchesCwd(p?.cwd) || agentAddrs.has(t.address)) {
+          included.add(t.address);
+        }
+      }
+
+      // Include child sub-terminals via parent tree
+      let added = true;
+      while (added) {
+        added = false;
+        for (const t of allLive) {
+          if (!included.has(t.address) && t.parent && included.has(t.parent)) {
+            included.add(t.address);
+            added = true;
+          }
+        }
+      }
+
+      return allLive.filter((t) => included.has(t.address));
+    } catch {
+      return [];
+    }
+  }
+
+  activeThreePanes() {
+    if (!this.threePanes) return null;
+    const paneList = panes?.() ?? [];
+    const liveIds = new Set(paneList.map((p) => p.pane));
+    const { left, rightTop, rightBottom } = this.threePanes;
+    if (!liveIds.has(left) || !liveIds.has(rightTop) || !liveIds.has(rightBottom)) {
+      return null;
+    }
+    return this.threePanes;
+  }
+
+  targetPaneForRole(role) {
+    const tp = this.activeThreePanes();
+    if (tp) {
+      if (role === "inv" || role === "rel") return tp.rightTop;
+      if (role === "dev" || role === "qa") return tp.rightBottom;
+      if (role === "lead") return tp.left;
+    }
+    const f = focused?.() ?? null;
+    if (f?.pane) return f.pane;
+    const paneList = panes?.() ?? [];
+    return paneList[0]?.pane ?? null;
+  }
+
+  findRoleTerminal(roleCandidates, wsTerms) {
+    const list = wsTerms ?? this.workspaceTerminals();
+    for (const role of roleCandidates) {
+      const hit = list.find((t) => matchTerminalRole(t) === role);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  connectThreePanes(cx) {
+    const tp = this.activeThreePanes();
+    if (!tp) return;
+    const wsTerms = this.workspaceTerminals();
+    const leadTerm = this.findRoleTerminal(["lead"], wsTerms);
+    const rtTerm = this.findRoleTerminal(["inv", "rel"], wsTerms);
+    const rbTerm = this.findRoleTerminal(["dev", "qa"], wsTerms);
+
+    let connected = 0;
+    if (leadTerm) {
+      run("terminal.show", { terminal: leadTerm.address, pane: tp.left });
+      connected += 1;
+    }
+    if (rtTerm) {
+      run("terminal.show", { terminal: rtTerm.address, pane: tp.rightTop });
+      connected += 1;
+    }
+    if (rbTerm) {
+      run("terminal.show", { terminal: rbTerm.address, pane: tp.rightBottom });
+      connected += 1;
+    }
+    this.layoutStatus = connected > 0 ? `已連接 ${connected} 個 AI Agent` : "3 格就緒（尚無對應 Agent）";
+    cx?.notify?.();
+  }
+
+  openOrConnectSlot(paneId, roleCandidates, cx) {
+    if (!paneId) return;
+    const wsTerms = this.workspaceTerminals();
+    const hit = this.findRoleTerminal(roleCandidates, wsTerms);
+    if (hit) {
+      run("terminal.show", { terminal: hit.address, pane: paneId });
+      this.layoutStatus = `已連接 ${hit.name || hit.template || roleCandidates[0]}`;
+    } else if (this.cwd) {
+      run("terminal.open", { folder: this.cwd, pane: paneId });
+      this.layoutStatus = `已於格位開啟終端機 (${roleCandidates[0]})`;
+    }
+    cx?.notify?.();
+  }
+
+  buildThreePanes(cx) {
+    if (this.buildingLayout || !this.cwd) return;
+    this.buildingLayout = true;
+    this.layoutStatus = "建置 3 格視窗中 (1/3)…";
+    cx.notify();
+
+    const targetCwd = this.cwd;
+    const cur = this.data?.current;
+    const tabName = cur ? `Issue #${cur.id}` : "AI Team";
+
+    cx.spawn(async (cx) => {
+      try {
+        const beforeTabs = new Set(spaces().flatMap((s) => (s.tabs ?? []).map((t) => t.id)));
+        const beforePanes = new Set(panes().map((p) => p.pane));
+
+        run("tab.new", { folder: targetCwd, name: tabName });
+
+        const step1 = await pollUntil(cx, () => {
+          const allTabs = spaces().flatMap((s) => s.tabs ?? []);
+          const newTab = allTabs.find((t) => !beforeTabs.has(t.id));
+          const allPanes = panes();
+          if (newTab) {
+            const p = allPanes.find((x) => x.tab === newTab.id);
+            if (p) return { tabId: newTab.id, paneId: p.pane };
+          }
+          const fallback = allPanes.find((x) => !beforePanes.has(x.pane));
+          return fallback ? { tabId: fallback.tab, paneId: fallback.pane } : null;
+        }, 30, 100);
+
+        if (!step1) {
+          this.layoutStatus = "建立新分頁逾時";
+          return;
+        }
+
+        const { tabId, paneId: leftPaneId } = step1;
+        this.layoutStatus = "建置 3 格視窗中 (2/3)…";
+        cx.notify();
+
+        const knownAfter1 = new Set(panes().map((p) => p.pane));
+        run("pane.split", { direction: "right", pane: leftPaneId });
+
+        const rightTopPane = await pollUntil(cx, () => {
+          const allPanes = panes();
+          return (
+            allPanes.find((p) => !knownAfter1.has(p.pane) && (!tabId || p.tab === tabId)) ||
+            allPanes.find((p) => !knownAfter1.has(p.pane)) ||
+            null
+          );
+        }, 30, 100);
+
+        if (!rightTopPane) {
+          this.layoutStatus = "建立右上格位逾時";
+          return;
+        }
+
+        const rightTopPaneId = rightTopPane.pane;
+        this.layoutStatus = "建置 3 格視窗中 (3/3)…";
+        cx.notify();
+
+        const knownAfter2 = new Set(panes().map((p) => p.pane));
+        run("pane.split", { direction: "down", pane: rightTopPaneId });
+
+        const rightBottomPane = await pollUntil(cx, () => {
+          const allPanes = panes();
+          return (
+            allPanes.find((p) => !knownAfter2.has(p.pane) && (!tabId || p.tab === tabId)) ||
+            allPanes.find((p) => !knownAfter2.has(p.pane)) ||
+            null
+          );
+        }, 30, 100);
+
+        if (!rightBottomPane) {
+          this.layoutStatus = "建立右下格位逾時";
+          return;
+        }
+
+        this.threePanes = {
+          tabId,
+          left: leftPaneId,
+          rightTop: rightTopPaneId,
+          rightBottom: rightBottomPane.pane,
+        };
+        this.connectThreePanes(cx);
+      } catch (err) {
+        this.layoutStatus = `建置失敗: ${String(err)}`;
+      } finally {
+        this.buildingLayout = false;
+        cx.notify();
+      }
+    });
   }
 
   renderDetail(t, cx) {
@@ -716,8 +989,26 @@ export default class IssuePanel extends View {
     const cur = data?.current ?? null;
     const st = statusStyle(cur?.status, t);
     const activeAgents = this.workspaceAgents();
+    const wsTerms = this.workspaceTerminals();
     const paneList = panes?.() ?? [];
     const paneById = new Map(paneList.map((p) => [p.pane, p]));
+    const termByAddr = new Map(wsTerms.map((term) => [term.address, term]));
+    const tp = this.activeThreePanes();
+    const hiddenTerms = wsTerms.filter((term) => !term.pane || !paneById.has(term.pane));
+
+    const slotInfo = (paneId, label, roles) => {
+      const p = paneId ? paneById.get(paneId) : null;
+      const boundTerm = p?.terminal ? termByAddr.get(p.terminal) : null;
+      const candidate = this.findRoleTerminal(roles, wsTerms);
+      return { paneId, label, roles, boundTerm, candidate };
+    };
+    const threeSlots = tp
+      ? [
+          slotInfo(tp.left, "左主控 (lead)", ["lead"]),
+          slotInfo(tp.rightTop, "右上 (inv/rel)", ["inv", "rel"]),
+          slotInfo(tp.rightBottom, "右下 (dev/qa)", ["dev", "qa"]),
+        ]
+      : [];
 
     return v_flex()
       .size_full()
@@ -890,6 +1181,315 @@ export default class IssuePanel extends View {
                         .text_size(11)
                         .text_color(t.dim)
                         .child(data?.has_ai_team ? ".ai_team/ 內尚無 issue_* 目錄" : "此工作區尚未建立 .ai_team/ 目錄")
+                    )
+                )
+              )
+              // 3-Pane Workspace Builder & Agent Slot Connector
+              .when(Boolean(this.cwd), (el) =>
+                el.child(
+                  v_flex()
+                    .p(9)
+                    .gap(6)
+                    .rounded(7)
+                    .bg(t.surface)
+                    .border(1)
+                    .border_color(t.border)
+                    .child(
+                      h_flex()
+                        .justify_between()
+                        .items_center()
+                        .gap(6)
+                        .child(div().font_semibold().text_size(11.5).child("3-Pane 開發工作區"))
+                        .child(
+                          h_flex()
+                            .gap(4)
+                            .items_center()
+                            .when(Boolean(tp), (b) =>
+                              b.child(
+                                div()
+                                  .id("btn-3pane-connect")
+                                  .px(7)
+                                  .py(2)
+                                  .rounded(4)
+                                  .bg(t.chrome)
+                                  .border(1)
+                                  .border_color(t.border)
+                                  .text_size(10)
+                                  .text_color(t.foreground)
+                                  .cursor_pointer()
+                                  .hover((s) => s.bg(t.hover))
+                                  .on_click((_e, cx) => this.connectThreePanes(cx))
+                                  .child("自動連接")
+                              )
+                            )
+                            .child(
+                              div()
+                                .id("btn-3pane-build")
+                                .px(7)
+                                .py(2)
+                                .rounded(4)
+                                .bg(t.accent + "22")
+                                .border(1)
+                                .border_color(t.accent + "66")
+                                .text_size(10)
+                                .font_medium()
+                                .text_color(t.accent)
+                                .cursor_pointer()
+                                .hover((s) => s.bg(t.accent + "33"))
+                                .on_click((_e, cx) => this.buildThreePanes(cx))
+                                .child(this.buildingLayout ? "建置中…" : tp ? "重建 3 格" : "建立 3 格視窗")
+                            )
+                        )
+                    )
+                    .when(Boolean(this.layoutStatus), (s) =>
+                      s.child(div().text_size(10).text_color(t.muted).child(this.layoutStatus))
+                    )
+                    .when(!tp, (s) =>
+                      s.child(
+                        div()
+                          .text_size(10)
+                          .text_color(t.dim)
+                          .child("配置：左 lead 主控、右上 inv/rel、右下 dev/qa")
+                      )
+                    )
+                    .when(Boolean(tp), (s) =>
+                      s.children(
+                        threeSlots.map((slot, idx) => {
+                          const bt = slot.boundTerm;
+                          const name = bt
+                            ? bt.name || bt.template || bt.title || bt.program?.name || bt.address
+                            : "未連接";
+                          const stateTxt = bt ? bt.status || bt.state || "live" : slot.candidate ? `可連接 ${slot.candidate.name || slot.candidate.template || slot.candidate.address}` : "待啟動";
+                          return h_flex()
+                            .id(`slot-3pane-${idx}`)
+                            .px(7)
+                            .py(4)
+                            .gap(6)
+                            .rounded(5)
+                            .bg(t.chrome)
+                            .border(1)
+                            .border_color(bt ? t.accent + "44" : t.border)
+                            .items_center()
+                            .justify_between()
+                            .child(
+                              v_flex()
+                                .flex_1()
+                                .min_w(0)
+                                .gap(1)
+                                .child(div().text_size(10).text_color(t.dim).child(slot.label))
+                                .child(
+                                  div()
+                                    .text_size(10.5)
+                                    .font_medium()
+                                    .truncate()
+                                    .text_color(bt ? t.foreground : t.muted)
+                                    .child(`${name} · ${stateTxt}`)
+                                )
+                            )
+                            .child(
+                              h_flex()
+                                .gap(4)
+                                .flex_none()
+                                .child(
+                                  div()
+                                    .id(`slot-focus-${idx}`)
+                                    .px(6)
+                                    .py(2)
+                                    .rounded(4)
+                                    .bg(t.surface)
+                                    .border(1)
+                                    .border_color(t.border)
+                                    .text_size(9.5)
+                                    .text_color(t.foreground)
+                                    .cursor_pointer()
+                                    .hover((h) => h.bg(t.hover))
+                                    .on_click(() => run("pane.focus", { pane: slot.paneId }))
+                                    .child("聚焦")
+                                )
+                                .when(!bt, (b) =>
+                                  b.child(
+                                    div()
+                                      .id(`slot-bind-${idx}`)
+                                      .px(6)
+                                      .py(2)
+                                      .rounded(4)
+                                      .bg(t.accent + "22")
+                                      .border(1)
+                                      .border_color(t.accent + "55")
+                                      .text_size(9.5)
+                                      .text_color(t.accent)
+                                      .cursor_pointer()
+                                      .hover((h) => h.bg(t.accent + "33"))
+                                      .on_click((_e, cx) => this.openOrConnectSlot(slot.paneId, slot.roles, cx))
+                                      .child(slot.candidate ? "連接" : "開啟")
+                                  )
+                                )
+                            );
+                        })
+                      )
+                    )
+                )
+              )
+              // Sub-Terminals & Live Terminals (including hidden hc sub-terminals)
+              .when(Boolean(this.cwd), (el) =>
+                el.child(
+                  v_flex()
+                    .p(9)
+                    .gap(6)
+                    .rounded(7)
+                    .bg(t.surface)
+                    .border(1)
+                    .border_color(t.border)
+                    .child(
+                      h_flex()
+                        .justify_between()
+                        .items_center()
+                        .child(div().font_semibold().text_size(11.5).child("Terminals / hc Sub-Terminals"))
+                        .child(
+                          div()
+                            .text_size(10)
+                            .text_color(hiddenTerms.length > 0 ? t.accent : t.dim)
+                            .child(`${wsTerms.length} 執行中${hiddenTerms.length > 0 ? ` (${hiddenTerms.length} 背景)` : ""}`)
+                        )
+                    )
+                    .when(wsTerms.length === 0, (s) =>
+                      s.child(div().text_size(10.5).text_color(t.dim).child("目前工作區無執行中的 Terminal"))
+                    )
+                    .children(
+                      wsTerms.map((term, idx) => {
+                        const hasPane = Boolean(term.pane && paneById.has(term.pane));
+                        const role = matchTerminalRole(term);
+                        const label = term.name || term.template || term.title || term.program?.name || term.address;
+                        const targetPane = this.targetPaneForRole(role);
+                        return v_flex()
+                          .id(`ws-term-${idx}`)
+                          .px(7)
+                          .py(5)
+                          .gap(4)
+                          .rounded(5)
+                          .bg(t.chrome)
+                          .border(1)
+                          .border_color(!hasPane ? t.accent + "44" : t.border)
+                          .child(
+                            h_flex()
+                              .justify_between()
+                              .items_center()
+                              .gap(6)
+                              .child(
+                                h_flex()
+                                  .gap(5)
+                                  .items_center()
+                                  .flex_1()
+                                  .min_w(0)
+                                  .child(div().size(6).rounded(3).flex_none().bg(agentDotColor(term.status, t)))
+                                  .child(div().text_size(10.5).font_medium().truncate().text_color(t.foreground).child(label))
+                                  .when(Boolean(role), (r) =>
+                                    r.child(
+                                      div()
+                                        .px(4)
+                                        .py(1)
+                                        .rounded(3)
+                                        .bg(t.surface)
+                                        .border(1)
+                                        .border_color(t.border)
+                                        .text_size(9)
+                                        .text_color(t.muted)
+                                        .child(role)
+                                    )
+                                  )
+                              )
+                              .child(
+                                div()
+                                  .flex_none()
+                                  .px(5)
+                                  .py(1)
+                                  .rounded(3)
+                                  .bg(hasPane ? t.surface : t.accent + "22")
+                                  .text_size(9)
+                                  .text_color(hasPane ? t.dim : t.accent)
+                                  .child(hasPane ? (term.status || "pane") : "背景 hc")
+                              )
+                          )
+                          .child(
+                            h_flex()
+                              .gap(4)
+                              .flex_wrap()
+                              .when(hasPane, (b) =>
+                                b.child(
+                                  div()
+                                    .id(`term-focus-${idx}`)
+                                    .px(6)
+                                    .py(2)
+                                    .rounded(4)
+                                    .bg(t.surface)
+                                    .border(1)
+                                    .border_color(t.border)
+                                    .text_size(9.5)
+                                    .text_color(t.foreground)
+                                    .cursor_pointer()
+                                    .hover((h) => h.bg(t.hover))
+                                    .on_click(() => {
+                                      if (term.pane) run("pane.focus", { pane: term.pane });
+                                      else run("agent.focus", { terminal: term.address });
+                                    })
+                                    .child("Focus")
+                                )
+                              )
+                              .when(!hasPane, (b) =>
+                                b
+                                  .child(
+                                    div()
+                                      .id(`term-peek-${idx}`)
+                                      .px(6)
+                                      .py(2)
+                                      .rounded(4)
+                                      .bg(t.surface)
+                                      .border(1)
+                                      .border_color(t.border)
+                                      .text_size(9.5)
+                                      .text_color(t.foreground)
+                                      .cursor_pointer()
+                                      .hover((h) => h.bg(t.hover))
+                                      .on_click(() => run("terminal.peek", { terminal: term.address }))
+                                      .child("Peek")
+                                  )
+                                  .child(
+                                    div()
+                                      .id(`term-tab-${idx}`)
+                                      .px(6)
+                                      .py(2)
+                                      .rounded(4)
+                                      .bg(t.surface)
+                                      .border(1)
+                                      .border_color(t.border)
+                                      .text_size(9.5)
+                                      .text_color(t.foreground)
+                                      .cursor_pointer()
+                                      .hover((h) => h.bg(t.hover))
+                                      .on_click(() => run("terminal.keep", { terminal: term.address, place: "tab" }))
+                                      .child("Tab")
+                                  )
+                                  .when(Boolean(targetPane), (pBtn) =>
+                                    pBtn.child(
+                                      div()
+                                        .id(`term-pane-${idx}`)
+                                        .px(6)
+                                        .py(2)
+                                        .rounded(4)
+                                        .bg(t.accent + "22")
+                                        .border(1)
+                                        .border_color(t.accent + "55")
+                                        .text_size(9.5)
+                                        .text_color(t.accent)
+                                        .cursor_pointer()
+                                        .hover((h) => h.bg(t.accent + "33"))
+                                        .on_click(() => run("terminal.show", { terminal: term.address, pane: targetPane }))
+                                        .child("Pane")
+                                    )
+                                  )
+                              )
+                          );
+                      })
                     )
                 )
               )
